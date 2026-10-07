@@ -4,6 +4,7 @@
 #include "config.h"
 #include "desk_protocol.h"
 #include "height_endpoint.h"
+#include "desk_control.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32H2)
 #error "Select ESP32H2 Dev Module"
@@ -17,9 +18,9 @@ HardwareSerial deskSerial(1);
 desk::Parser parser;
 desk::Controller controller(DESK_NUDGE_MS, DESK_PRESET_HOLD_MS);
 HeightEndpoint heightSensor(9);
-ZigbeeLight standControl(1), sitControl(2), preset1Control(3), preset2Control(4);
-ZigbeeLight upControl(5), downControl(6), memoryControl(7), releaseControl(8);
-ZigbeeLight *controls[] = {&standControl, &sitControl, &preset1Control, &preset2Control,
+DeskControl standControl(1), sitControl(2), preset1Control(3), preset2Control(4);
+DeskControl upControl(5), downControl(6), memoryControl(7), releaseControl(8);
+DeskControl *controls[] = {&standControl, &sitControl, &preset1Control, &preset2Control,
                           &upControl, &downControl, &memoryControl, &releaseControl};
 
 // Zigbee callbacks run in another task. They only enqueue; UART belongs to loop().
@@ -52,7 +53,7 @@ void sendDesk(desk::Command command) {
 }
 
 void reportOff(uint8_t endpoint) {
-  // setLight(false) has already updated the value. Explicit report for momentary UI.
+  // clearPress() has already updated the value. Explicit report for momentary UI.
   esp_zb_zcl_report_attr_cmd_t report = {};
   report.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
   report.zcl_basic_cmd.src_endpoint = endpoint;
@@ -86,14 +87,14 @@ void setup() {
   if (RESET_BUTTON_PIN >= 0) pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
   deskSerial.begin(9600, SERIAL_8N1, DESK_RX_PIN, DESK_TX_PIN);
   controller.begin(millis());
-  standControl.onLightChange(onControl<0>);
-  sitControl.onLightChange(onControl<1>);
-  preset1Control.onLightChange(onControl<2>);
-  preset2Control.onLightChange(onControl<3>);
-  upControl.onLightChange(onControl<4>);
-  downControl.onLightChange(onControl<5>);
-  memoryControl.onLightChange(onControl<6>);
-  releaseControl.onLightChange(onControl<7>);
+  standControl.onPress(onControl<0>);
+  sitControl.onPress(onControl<1>);
+  preset1Control.onPress(onControl<2>);
+  preset2Control.onPress(onControl<3>);
+  upControl.onPress(onControl<4>);
+  downControl.onPress(onControl<5>);
+  memoryControl.onPress(onControl<6>);
+  releaseControl.onPress(onControl<7>);
   for (auto *control : controls) {
     control->setManufacturerAndModel("JKCD", "Flexispot-E7Q-H2");
     control->setPowerSource(ZB_POWER_SOURCE_MAINS);
@@ -159,7 +160,7 @@ void loop() {
     lastIdlePacket = now;
   }
   for (unsigned i = 0; i < 8; ++i) if (acks & (1u << i)) {
-    controls[i]->setLight(false);
+    controls[i]->clearPress();
     if (connected) reportOff(i + 1);
   }
   if (connected && !isnan(latestHeightCm) &&
