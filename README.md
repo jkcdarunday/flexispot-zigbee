@@ -22,9 +22,9 @@ keypad connected.
 | --- | --- | --- | --- |
 | Brown | 8 | 5V/VBUS input | Desk power |
 | White-brown | 7 | GND | Common ground |
-| Green | 6 | GPIO11 | UART TX: H2 → desk |
-| White-blue | 5 | GPIO12 | UART RX: desk → H2 |
-| Blue | 4 | GPIO13 | Wake / keypad enable |
+| Green | 6 | GPIO10 | UART TX: H2 → desk |
+| Light blue / white-blue | 5 | GPIO11 | UART RX: desk → H2 |
+| Blue | 4 | GPIO12 | Wake / keypad enable |
 
 The other three wires are unused. This is a proprietary UART connector,
 **not Ethernet**; never connect it to network equipment.
@@ -43,9 +43,9 @@ explicitly supports it; Super Mini boards vary.
 Edit [`firmware/flexispot_zigbee/config.h`](firmware/flexispot_zigbee/config.h):
 
 ```cpp
-#define DESK_TX_PIN 11
-#define DESK_RX_PIN 12
-#define DESK_WAKE_PIN 13
+#define DESK_TX_PIN 10
+#define DESK_RX_PIN 11
+#define DESK_WAKE_PIN 12
 #define RESET_BUTTON_PIN 9
 #define DESK_DISPLAY_IN_INCHES 0
 #define DESK_NUDGE_MS 500
@@ -99,7 +99,7 @@ For example, compile with different GPIOs without editing defaults:
 
 ```sh
 bash scripts/build.sh --build-property \
-  'compiler.cpp.extra_flags=-DDESK_TX_PIN=11 -DDESK_RX_PIN=12 -DDESK_WAKE_PIN=13'
+  'compiler.cpp.extra_flags=-DDESK_TX_PIN=10 -DDESK_RX_PIN=11 -DDESK_WAKE_PIN=12'
 ```
 
 For a **2MB** H2 board use `FlashSize=2M,PartitionScheme=zigbee_2MB` instead
@@ -282,7 +282,7 @@ configurable in `config.h`; use `STATUS_LED_PIN=-1` to disable it, or set
 `STATUS_LED_BRIGHTNESS` from 0 to 255. The default 24 keeps it unobtrusive, and
 connected idle green is dimmer still. `STATUS_LED_COLOR_ORDER` defaults to
 `LED_COLOR_ORDER_GRB`; change it if your board's pixel uses a different order.
-GPIO8 is independent of the desk's wake signal on GPIO13.
+GPIO8 is independent of the desk's wake signal on GPIO12.
 
 | Indication | Meaning |
 | --- | --- |

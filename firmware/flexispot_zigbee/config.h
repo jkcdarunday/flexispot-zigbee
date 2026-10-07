@@ -2,13 +2,13 @@
 
 // GPIO numbers, not header positions. Override here or with -D build flags.
 #ifndef DESK_TX_PIN
-#define DESK_TX_PIN 11  // green, RJ45 pin 6
+#define DESK_TX_PIN 10  // green, RJ45 pin 6
 #endif
 #ifndef DESK_RX_PIN
-#define DESK_RX_PIN 12  // white-blue, RJ45 pin 5
+#define DESK_RX_PIN 11  // light blue / white-blue, RJ45 pin 5
 #endif
 #ifndef DESK_WAKE_PIN
-#define DESK_WAKE_PIN 13  // blue, RJ45 pin 4
+#define DESK_WAKE_PIN 12  // blue, RJ45 pin 4
 #endif
 #ifndef RESET_BUTTON_PIN
 #define RESET_BUTTON_PIN 9  // usual H2 Super Mini BOOT button; -1 disables it
