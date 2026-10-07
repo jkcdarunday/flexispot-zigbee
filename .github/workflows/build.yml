@@ -1,0 +1,29 @@
+name: Validate firmware
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Protocol and timing tests
+        run: bash scripts/test.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Zigbee2MQTT converter validation
+        run: |
+          mkdir -p /tmp/converter-check
+          npm install --prefix /tmp/converter-check --ignore-scripts zigbee-herdsman-converters@26.117.1
+          cp integrations/zigbee2mqtt/flexispot-e7q-h2.mjs /tmp/converter-check/converter.mjs
+          node tests/converter_test.mjs /tmp/converter-check/converter.mjs
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned ESP32 core
+        run: >-
+          arduino-cli core install esp32:esp32@3.3.6
+          --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - name: Build ESP32-H2 firmware
+        run: bash scripts/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flexispot-e7q-esp32h2
+          path: build/
