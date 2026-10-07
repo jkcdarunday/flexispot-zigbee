@@ -51,6 +51,8 @@ Edit [`firmware/flexispot_zigbee/config.h`](firmware/flexispot_zigbee/config.h):
 #define DESK_NUDGE_MS 500
 #define DESK_PRESET_HOLD_MS 1000
 #define DESK_DEBUG_UART 0
+#define STATUS_LED_PIN 8
+#define STATUS_LED_BRIGHTNESS 24
 ```
 
 The file already contains these defaults guarded by `#ifndef`. Change the
@@ -272,6 +274,37 @@ at most once per second and repeats the last known height every minute.
 Height is the **last valid display value**, not a guarantee the UART is still
 connected; a sleeping/blank/error display retains that value. Do not treat a
 cached height as an independent movement safety signal.
+
+## Onboard RGB status light
+
+The center WS2812 RGB LED uses GPIO8 by default. Its pin and brightness are
+configurable in `config.h`; use `STATUS_LED_PIN=-1` to disable it, or set
+`STATUS_LED_BRIGHTNESS` from 0 to 255. The default 24 keeps it unobtrusive, and
+connected idle green is dimmer still. `STATUS_LED_COLOR_ORDER` defaults to
+`LED_COLOR_ORDER_GRB`; change it if your board's pixel uses a different order.
+GPIO8 is independent of the desk's wake signal on GPIO13.
+
+| Indication | Meaning |
+| --- | --- |
+| Dim green | Zigbee stack reports connected to the network |
+| Blinking amber | Disconnected / waiting to join or reconnect |
+| Three quick purple flashes | A desk command starts transmitting, or Release keys was requested |
+| Brief cyan flash | A new valid height differs from the previous reading |
+| Red during startup failure | Zigbee initialization failed, before rebooting |
+
+Purple is triggered by the first active UART command response, after wake timing,
+not merely by receipt of a Zigbee request. Repeated controller polls and idle
+keepalive packets do not retrigger it. Busy/dropped requests do not flash purple.
+Cyan also indicates physical-keypad movement if the resulting height is received;
+the first height reading at startup and repeated identical readings do not flash.
+Purple takes priority when command and height events overlap. Status returns to
+the connection color after the flashes. Height changes can flash while disconnected.
+
+Connection means network membership according to the Zigbee stack; it does not
+confirm Home Assistant is running or that the desk UART is responding. LED timing
+uses the normal firmware loop and adds no blink delays to desk control. This is a
+local indicator only and does not add a Home Assistant light entity. Updating this
+version keeps the same switch descriptors and does not require another re-pair.
 
 ## Troubleshooting and development
 

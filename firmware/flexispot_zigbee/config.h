@@ -25,6 +25,15 @@
 #ifndef DESK_DEBUG_UART
 #define DESK_DEBUG_UART 0  // raw RX/TX hex on USB serial
 #endif
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 8  // onboard WS2812 RGB LED; -1 disables status indication
+#endif
+#ifndef STATUS_LED_BRIGHTNESS
+#define STATUS_LED_BRIGHTNESS 24  // 0..255; idle green uses one quarter of this
+#endif
+#ifndef STATUS_LED_COLOR_ORDER
+#define STATUS_LED_COLOR_ORDER LED_COLOR_ORDER_GRB
+#endif
 
 static_assert(DESK_TX_PIN != DESK_RX_PIN && DESK_TX_PIN != DESK_WAKE_PIN &&
               DESK_RX_PIN != DESK_WAKE_PIN, "Desk GPIOs must be distinct");
@@ -34,3 +43,9 @@ static_assert(RESET_BUTTON_PIN < 0 ||
 static_assert(DESK_NUDGE_MS > 0 && DESK_NUDGE_MS <= 5000, "Nudge must be 1..5000 ms");
 static_assert(DESK_PRESET_HOLD_MS > 0 && DESK_PRESET_HOLD_MS <= 1500,
               "Preset hold must be 1..1500 ms");
+static_assert(STATUS_LED_PIN < 0 ||
+              (STATUS_LED_PIN != DESK_TX_PIN && STATUS_LED_PIN != DESK_RX_PIN &&
+               STATUS_LED_PIN != DESK_WAKE_PIN && STATUS_LED_PIN != RESET_BUTTON_PIN),
+              "Status LED GPIO overlaps desk/reset wiring");
+static_assert(STATUS_LED_BRIGHTNESS >= 0 && STATUS_LED_BRIGHTNESS <= 255,
+              "Status LED brightness must be 0..255");

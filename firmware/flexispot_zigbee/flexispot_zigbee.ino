@@ -5,6 +5,7 @@
 #include "desk_protocol.h"
 #include "height_endpoint.h"
 #include "desk_control.h"
+#include "status_indicator.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32H2)
 #error "Select ESP32H2 Dev Module"
@@ -17,6 +18,7 @@
 HardwareSerial deskSerial(1);
 desk::Parser parser;
 desk::Controller controller(DESK_NUDGE_MS, DESK_PRESET_HOLD_MS);
+desk::StatusIndicator statusIndicator;
 HeightEndpoint heightSensor(9);
 DeskControl standControl(1), sitControl(2), preset1Control(3), preset2Control(4);
 DeskControl upControl(5), downControl(6), memoryControl(7), releaseControl(8);
@@ -28,6 +30,20 @@ QueueHandle_t requests;
 portMUX_TYPE requestMux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t acknowledgements = 0;
 bool releaseRequested = false;
+
+void updateStatusLed(bool connected, bool fault = false) {
+  if (STATUS_LED_PIN < 0) return;
+  const auto color = statusIndicator.color(millis(), connected, fault);
+  static desk::LedColor previous = {0, 0, 0};
+  static bool initialized = false;
+  if (initialized && color == previous) return;
+  rgbLedWriteOrdered(STATUS_LED_PIN, STATUS_LED_COLOR_ORDER,
+      uint16_t(color.red) * STATUS_LED_BRIGHTNESS / 255,
+      uint16_t(color.green) * STATUS_LED_BRIGHTNESS / 255,
+      uint16_t(color.blue) * STATUS_LED_BRIGHTNESS / 255);
+  previous = color;
+  initialized = true;
+}
 
 template<unsigned Index> void onControl(bool on) {
   if (!on) return;  // includes our automatic reset to OFF
@@ -44,7 +60,15 @@ template<unsigned Index> void onControl(bool on) {
 void sendDesk(desk::Command command) {
   uint8_t packet[8];
   desk::commandPacket(command, packet);
-  deskSerial.write(packet, sizeof(packet));
+  const size_t written = deskSerial.write(packet, sizeof(packet));
+  static desk::Command lastSent = desk::Command::Release;
+  if (written == sizeof(packet)) {
+    // Only the first active reply flashes; repeated poll replies and idle
+    // keepalives must not continually retrigger the LED.
+    if (command != desk::Command::Release && command != lastSent)
+      statusIndicator.commandSent(millis());
+    lastSent = command;
+  }
 #if DESK_DEBUG_UART
   Serial.print("TX:");
   for (uint8_t b : packet) Serial.printf(" %02X", b);
@@ -76,10 +100,12 @@ void setup() {
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
   if (!GPIO_IS_VALID_OUTPUT_GPIO(DESK_TX_PIN) || !GPIO_IS_VALID_GPIO(DESK_RX_PIN) ||
       !GPIO_IS_VALID_OUTPUT_GPIO(DESK_WAKE_PIN) ||
-      (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN))) {
+      (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
+      (STATUS_LED_PIN >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))) {
     Serial.println("Invalid GPIO configuration. Desk interface disabled.");
     while (true) delay(1000);
   }
+  updateStatusLed(false);
   requests = xQueueCreate(8, sizeof(uint8_t));
   if (!requests) abort();
   pinMode(DESK_WAKE_PIN, OUTPUT);
@@ -106,10 +132,12 @@ void setup() {
   Zigbee.setRxOnWhenIdle(true);
   if (!Zigbee.begin()) {
     Serial.println("Zigbee startup failed; restarting.");
+    updateStatusLed(false, true);
     ESP.restart();
   }
   Serial.printf("Desk UART TX=%d RX=%d WAKE=%d; permit joining on your coordinator.\n",
                 DESK_TX_PIN, DESK_RX_PIN, DESK_WAKE_PIN);
+  Serial.printf("RGB status LED GPIO=%d brightness=%d\n", STATUS_LED_PIN, STATUS_LED_BRIGHTNESS);
   // No wait for pairing: serial service and reset button must keep working offline.
 }
 
@@ -128,6 +156,7 @@ void loop() {
     xQueueReset(requests);
     digitalWrite(DESK_WAKE_PIN, HIGH);
     sendDesk(desk::Command::Release);
+    if (release) statusIndicator.commandSent(millis());
   }
   const auto previousState = controller.state();
   controller.tick(now);  // deadlines checked before processing incoming polls
@@ -152,7 +181,10 @@ void loop() {
     if (!parser.feed(byte, now, event)) continue;
     if (event.poll) sendDesk(controller.pollResponse());
     if (event.hasHeight) {
-      latestHeightCm = event.height * (DESK_DISPLAY_IN_INCHES ? 2.54f : 1.0f);
+      const float heightCm = event.height * (DESK_DISPLAY_IN_INCHES ? 2.54f : 1.0f);
+      if (!isnan(latestHeightCm) && heightCm != latestHeightCm)
+        statusIndicator.heightChanged(now);
+      latestHeightCm = heightCm;
     }
   }
   if (controller.state() == desk::Controller::State::Idle && now - lastIdlePacket >= 3000) {
@@ -185,5 +217,6 @@ void loop() {
       Zigbee.factoryReset();
     }
   } else resetHeld = false;
+  updateStatusLed(connected);
   delay(1);
 }
