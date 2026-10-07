@@ -124,6 +124,8 @@ the desk. It does not extend your Zigbee mesh as a router.
 | 9 | Height | Analog Input sensor, last valid display height in cm |
 
 These are momentary actions implemented with standard **On/Off** clusters.
+The included ZHA handler presents them as native **button** entities; the
+Zigbee2MQTT converter presents them as momentary switches.
 ON requests an action and resets to OFF promptly; OFF is a UI state reset and
 does not cancel movement. Use endpoint 8 to release keys. OFF reports acknowledge
 receipt, **not completed movement**. Commands during the initial ten-second boot
@@ -143,14 +145,69 @@ height control is not implemented.
 
 ### ZHA
 
+#### Native buttons (recommended)
+
+The included custom ZHA handler changes the Home Assistant presentation of the
+existing firmware. **No reflash or pairing reset is needed.** You get Stand,
+Sit, Preset 1, Preset 2, Up, Down, and Release keys as native `button` entities,
+alongside the existing height sensor. Memory is an optional configuration button,
+disabled by default; enable it from the device's entity list if you need it.
+
+1. Create `/config/custom_zha_quirks` on your **Home Assistant host**.
+2. Copy [`integrations/zha/flexispot_e7q_h2.py`](integrations/zha/flexispot_e7q_h2.py)
+   into that directory (not the ESP32).
+3. Merge this into Home Assistant's `configuration.yaml`. If you already have
+   a `zha:` section, add the settings there instead of creating a second section.
+
+   ```yaml
+   zha:
+     enable_quirks: true
+     custom_quirks_path: /config/custom_zha_quirks
+   ```
+
+4. Restart Home Assistant. ZHA loads the handler for manufacturer `JKCD`, model
+   `Flexispot-E7Q-H2`. Open the desk's ZHA device page and use the new buttons.
+5. Remove old light cards from your dashboard and replace them with the buttons.
+   Previous light entities may remain in the entity registry as unavailable;
+   remove those stale entries after confirming the buttons work. Update existing
+   automations to use `button.press` rather than `light.turn_on`.
+
+The handler was tested with `zha-quirks`/ZHA 2.3.0, including serialization of
+each button's actual Zigbee command. It includes the older Zigpy v2 builder
+import path for compatibility, but that older path has not been validated here.
+If the buttons do not appear, check Home Assistant's logs for custom-handler
+import errors and confirm the manufacturer/model on the device diagnostics.
+Update Home Assistant if its ZHA library lacks the required v2 button API.
+Reconfiguring the device can refresh binding/reporting; it does not itself load
+a newly installed Python handler, so restart Home Assistant first.
+
+Example Home Assistant script (replace the entity ID with your actual button):
+
+```yaml
+alias: Desk standing preset
+sequence:
+  - action: button.press
+    target:
+      entity_id: button.desk_stand
+mode: single
+```
+
+The Release keys button retains the limitations described above: it releases
+emulated keys, and is not a guaranteed motor stop. Native buttons do not add
+absolute target-height or cover/position control to the firmware.
+
+#### Pairing and generic discovery
+
 1. In Home Assistant, open **Settings → Devices & services → ZHA → Add device**.
 2. Power or reboot the H2 near the coordinator. A new device starts network
    steering automatically. If it was previously paired, hold its BOOT button
    for five seconds after startup to clear the pairing and restart.
-3. ZHA should discover eight On/Off **light** entities and a generic Analog Input
-   height sensor using standard clusters, without a custom quirk. Rename the
-   lights using the endpoint table; you can change their dashboard icons.
-4. Wait at least ten seconds after power-up, then turn ON **Up** for the first
+3. With the handler installed, ZHA presents native buttons and a height sensor.
+   Without the handler it discovers eight On/Off **light** entities and a generic
+   Analog Input height sensor. Rename those lights using the endpoint table if
+   you choose the generic presentation.
+4. Wait at least ten seconds after power-up, then press **Up** (or turn ON its
+   generic light) for the first
    brief movement test. Wake sequencing adds about 1.2 seconds before a keypress.
 
 The height cluster includes a length-prefixed description and BACnet unit 118
@@ -160,7 +217,7 @@ type. If an older ZHA installation does not create the sensor, inspect endpoint
 and `engineering_units` (0x0075). Read those attributes and reconfigure the device.
 Upgrade Home Assistant if its generic analog sensor support is insufficient.
 
-Example Home Assistant script after renaming the entity:
+Example script for the generic light presentation, without the handler:
 
 ```yaml
 alias: Desk standing preset
@@ -224,6 +281,13 @@ bash scripts/test.sh
 In a sandbox running under a debugger/ptrace, LeakSanitizer may be unavailable;
 use `ASAN_OPTIONS=detect_leaks=0 bash scripts/test.sh` in that environment.
 AddressSanitizer and UndefinedBehaviorSanitizer remain enabled.
+
+Native ZHA handler tests (Python 3.12+; use a separate virtual environment):
+
+```sh
+python -m pip install -r tests/requirements-zha.txt
+python tests/zha_buttons_test.py
+```
 
 ## Credits and license
 

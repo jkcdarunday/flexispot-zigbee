@@ -7,6 +7,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Protocol and timing tests
         run: bash scripts/test.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: ZHA native-button validation
+        run: |
+          python -m pip install -r tests/requirements-zha.txt
+          python tests/zha_buttons_test.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22
