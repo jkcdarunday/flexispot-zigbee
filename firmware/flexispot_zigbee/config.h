@@ -17,7 +17,7 @@
 #define DESK_DISPLAY_IN_INCHES 0  // must match the physical keypad display
 #endif
 #ifndef DESK_NUDGE_MS
-#define DESK_NUDGE_MS 500  // bounded up/down press; increase deliberately if needed
+#define DESK_NUDGE_MS 2000  // bounded two-second up/down press
 #endif
 #ifndef DESK_PRESET_HOLD_MS
 #define DESK_PRESET_HOLD_MS 1000

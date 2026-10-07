@@ -48,7 +48,7 @@ Edit [`firmware/flexispot_zigbee/config.h`](firmware/flexispot_zigbee/config.h):
 #define DESK_WAKE_PIN 12
 #define RESET_BUTTON_PIN 9
 #define DESK_DISPLAY_IN_INCHES 0
-#define DESK_NUDGE_MS 500
+#define DESK_NUDGE_MS 2000
 #define DESK_PRESET_HOLD_MS 1000
 #define DESK_DEBUG_UART 0
 #define STATUS_LED_PIN 8
@@ -119,8 +119,8 @@ the desk. It does not extend your Zigbee mesh as a router.
 | 2 | Sit | Press upstream sitting-preset key |
 | 3 | Preset 1 | Press memory key 1 |
 | 4 | Preset 2 | Press memory key 2 |
-| 5 | Up | Hold up for 500ms by default |
-| 6 | Down | Hold down for 500ms by default |
+| 5 | Up | Hold up for 2 seconds by default |
+| 6 | Down | Hold down for 2 seconds by default |
 | 7 | Memory | Press M; enters save mode |
 | 8 | Release | Release emulated keys and discard queued commands |
 | 9 | Height | Analog Input sensor, last valid display height in cm |
