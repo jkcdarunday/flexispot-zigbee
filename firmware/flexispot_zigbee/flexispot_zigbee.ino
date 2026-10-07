@@ -103,6 +103,8 @@ void setup() {
       (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
       (STATUS_LED_PIN >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))) {
     Serial.println("Invalid GPIO configuration. Desk interface disabled.");
+    if (STATUS_LED_PIN >= 0 && GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))
+      updateStatusLed(false, true);
     while (true) delay(1000);
   }
   updateStatusLed(false);
@@ -131,9 +133,9 @@ void setup() {
   Zigbee.addEndpoint(&heightSensor);
   Zigbee.setRxOnWhenIdle(true);
   if (!Zigbee.begin()) {
-    Serial.println("Zigbee startup failed; restarting.");
-    updateStatusLed(false, true);
-    ESP.restart();
+    // begin() can time out while the stack is still retrying initialization
+    // or a saved-network rejoin. Keep UART, LED and pairing reset responsive.
+    Serial.println("Zigbee startup pending; keeping desk interface active while the stack retries.");
   }
   Serial.printf("Desk UART TX=%d RX=%d WAKE=%d; permit joining on your coordinator.\n",
                 DESK_TX_PIN, DESK_RX_PIN, DESK_WAKE_PIN);

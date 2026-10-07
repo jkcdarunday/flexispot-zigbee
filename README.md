@@ -290,7 +290,7 @@ GPIO8 is independent of the desk's wake signal on GPIO12.
 | Blinking amber | Disconnected / waiting to join or reconnect |
 | Three quick purple flashes | A desk command starts transmitting, or Release keys was requested |
 | Brief cyan flash | A new valid height differs from the previous reading |
-| Red during startup failure | Zigbee initialization failed, before rebooting |
+| Red | Invalid GPIO configuration; desk interface disabled |
 
 Purple is triggered by the first active UART command response, after wake timing,
 not merely by receipt of a Zigbee request. Repeated controller polls and idle
@@ -305,6 +305,9 @@ confirm Home Assistant is running or that the desk UART is responding. LED timin
 uses the normal firmware loop and adds no blink delays to desk control. This is a
 local indicator only and does not add a Home Assistant light entity. Updating this
 version keeps the same switch descriptors and does not require another re-pair.
+If Zigbee's initial startup/rejoin wait times out, the firmware keeps its desk
+interface, status LED, and reset button running while the initialized Zigbee stack
+retries; a startup timeout does not force a reboot or clear the saved pairing.
 
 ## Troubleshooting and development
 
