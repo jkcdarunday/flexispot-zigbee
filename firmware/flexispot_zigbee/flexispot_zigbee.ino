@@ -1,11 +1,15 @@
 #include <Arduino.h>
 #include <Zigbee.h>
 #include <driver/gpio.h>
+#include <driver/uart.h>
+#include <esp_task_wdt.h>
 #include "config.h"
 #include "desk_protocol.h"
 #include "height_endpoint.h"
 #include "desk_control.h"
 #include "status_indicator.h"
+#include "connection_health.h"
+#include "zigbee_access.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32H2)
 #error "Select ESP32H2 Dev Module"
@@ -76,7 +80,7 @@ void sendDesk(desk::Command command) {
 #endif
 }
 
-void reportOff(uint8_t endpoint) {
+bool reportOff(uint8_t endpoint) {
   // clearPress() has already updated the value. Explicit report for momentary UI.
   esp_zb_zcl_report_attr_cmd_t report = {};
   report.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
@@ -85,9 +89,10 @@ void reportOff(uint8_t endpoint) {
   report.attributeID = ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID;
   report.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
   report.manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC;
-  esp_zb_lock_acquire(portMAX_DELAY);
-  esp_zb_zcl_report_attr_cmd_req(&report);
+  if (!acquireDeskZigbeeLock()) return false;
+  const auto result = esp_zb_zcl_report_attr_cmd_req(&report);
   esp_zb_lock_release();
+  return result == ESP_OK;
 }
 
 float latestHeightCm = NAN;
@@ -95,6 +100,64 @@ float reportedHeightCm = NAN;
 uint32_t lastHeightReport = 0;
 uint32_t lastIdlePacket = 0;
 bool wasConnected = false;
+desk::ConnectionHealth connectionHealth;
+uint32_t lastHeightAttempt = 0, lastAckAttempt = 0, lastProbe = 0;
+bool heightAttempted = false, ackAttempted = false;
+uint8_t pendingAcks = 0;
+// Callback data is shared with the Zigbee task; protected by requestMux.
+bool probePending = false, coordinatorReplied = false;
+bool pairingChecked = false;
+
+void coordinatorReply(esp_zb_zdp_status_t status, uint16_t address,
+                      esp_zb_af_node_desc_t *, void *) {
+  portENTER_CRITICAL(&requestMux);
+  probePending = false;
+  if (status == ESP_ZB_ZDP_STATUS_SUCCESS && address == 0)
+    coordinatorReplied = true;
+  portEXIT_CRITICAL(&requestMux);
+}
+
+void checkConnection(uint32_t now, bool connected) {
+  bool pending, replied;
+  portENTER_CRITICAL(&requestMux);
+  pending = probePending;
+  replied = coordinatorReplied;
+  coordinatorReplied = false;
+  portEXIT_CRITICAL(&requestMux);
+  // A saved network also needs recovery when rejoin never completes at boot.
+  if (!pairingChecked && Zigbee.started() && acquireDeskZigbeeLock()) {
+    if (!esp_zb_bdb_is_factory_new()) connectionHealth.paired(now);
+    pairingChecked = true;
+    esp_zb_lock_release();
+  }
+  connectionHealth.observe(now, connected);
+  if (replied) connectionHealth.reply(now);
+  // Never accumulate requests when the stack stops invoking callbacks.
+  if (connected && !pending && (!wasConnected || now - lastProbe >= 60000)) {
+    lastProbe = now;
+    Serial.printf("Zigbee coordinator check: uptime=%lu s, free heap=%u\n",
+                  static_cast<unsigned long>(now / 1000), ESP.getFreeHeap());
+    if (acquireDeskZigbeeLock()) {
+      portENTER_CRITICAL(&requestMux);
+      probePending = true;
+      portEXIT_CRITICAL(&requestMux);
+      esp_zb_zdo_node_desc_req_param_t request = {};
+      request.dst_nwk_addr = 0;  // Zigbee coordinator; independent of bindings
+      esp_zb_zdo_node_desc_req(&request, coordinatorReply, nullptr);
+      esp_zb_lock_release();
+    }
+  }
+  if (connectionHealth.needsRecovery(now)) {
+    controller.release();
+    xQueueReset(requests);
+    digitalWrite(DESK_WAKE_PIN, HIGH);
+    sendDesk(desk::Command::Release);
+    uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(100));
+    Serial.println("Zigbee unreachable for five minutes; restarting with saved pairing.");
+    ESP.restart();  // Never factory-reset as an automatic recovery.
+  }
+}
+
 
 void setup() {
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
@@ -140,12 +203,25 @@ void setup() {
   Serial.printf("Desk UART TX=%d RX=%d WAKE=%d; permit joining on your coordinator.\n",
                 DESK_TX_PIN, DESK_RX_PIN, DESK_WAKE_PIN);
   Serial.printf("RGB status LED GPIO=%d brightness=%d\n", STATUS_LED_PIN, STATUS_LED_BRIGHTNESS);
+  // Recover even if an SDK call stalls inside the Zigbee lock. Arduino feeds
+  // this watchdog between loop iterations, not from another task.
+  esp_task_wdt_config_t watchdog = {};
+  watchdog.timeout_ms = 30000;
+  watchdog.idle_core_mask = 0;
+  watchdog.trigger_panic = true;
+  esp_err_t watchdogResult = esp_task_wdt_init(&watchdog);
+  if (watchdogResult == ESP_ERR_INVALID_STATE)
+    watchdogResult = esp_task_wdt_reconfigure(&watchdog);
+  ESP_ERROR_CHECK(watchdogResult);
+  enableLoopWDT();
   // No wait for pairing: serial service and reset button must keep working offline.
 }
 
 void loop() {
   const uint32_t now = millis();
   const bool connected = Zigbee.connected();
+  if (connected != wasConnected)
+    Serial.println(connected ? "Zigbee connected." : "Zigbee disconnected.");
   bool release;
   uint8_t acks;
   portENTER_CRITICAL(&requestMux);
@@ -193,18 +269,27 @@ void loop() {
     sendDesk(desk::Command::Release);
     lastIdlePacket = now;
   }
-  for (unsigned i = 0; i < 8; ++i) if (acks & (1u << i)) {
-    controls[i]->clearPress();
-    if (connected) reportOff(i + 1);
+  pendingAcks |= acks;
+  if (pendingAcks && (!ackAttempted || now - lastAckAttempt >= 1000)) {
+    ackAttempted = true;
+    lastAckAttempt = now;
+    for (unsigned i = 0; i < 8; ++i) if (pendingAcks & (1u << i)) {
+      if (controls[i]->clearPress() && (!connected || reportOff(i + 1)))
+        pendingAcks &= uint8_t(~(1u << i));
+    }
   }
   if (connected && !isnan(latestHeightCm) &&
+      (!heightAttempted || now - lastHeightAttempt >= 1000) &&
       ((!wasConnected) || now - lastHeightReport >= 60000 ||
        (latestHeightCm != reportedHeightCm && now - lastHeightReport >= 1000))) {
+    heightAttempted = true;
+    lastHeightAttempt = now;
     if (heightSensor.setHeight(latestHeightCm) && heightSensor.reportHeight()) {
       reportedHeightCm = latestHeightCm;
       lastHeightReport = now;
     }
   }
+  checkConnection(now, connected);
   wasConnected = connected;
 
   static bool resetHeld = false;

@@ -357,3 +357,24 @@ APIs and integration behavior were checked against:
 [Arduino-ESP32 3.3.6](https://github.com/espressif/arduino-esp32/tree/3.3.6/libraries/Zigbee),
 [ZHA's Analog Input sensor](https://github.com/zigpy/zha/blob/dev/zha/application/platforms/sensor/__init__.py),
 and [Zigbee2MQTT modern extensions](https://github.com/Koenkk/zigbee-herdsman-converters/blob/master/src/lib/modernExtend.ts).
+
+### Recovery from a lost Zigbee connection
+
+The bridge queries the coordinator once per minute. If it has joined a network
+but receives no successful coordinator reply for five minutes, it releases its
+emulated desk key and restarts using the saved pairing. An unpaired bridge does
+not repeatedly restart. This check does not rely on queued reports or Arduino's
+cached connection flag as proof of delivery. Only one query can be outstanding.
+
+Zigbee lock waits are limited to 50 ms so a busy stack cannot indefinitely block
+the UART service, status LED, or BOOT button. Failed height/OFF report attempts
+are limited to once per second, with pending OFF acknowledgements retained.
+A 30-second loop watchdog also restarts the bridge if an SDK call stalls. These
+recoveries preserve Zigbee pairing; holding BOOT remains the explicit reset.
+A prolonged coordinator outage can result in another recovery five minutes
+after rejoining. Rebooting releases bridge keys but is not a guaranteed motor
+stop for a preset already activated in the desk controller.
+
+If an outage persists, capture the USB serial log and check signal strength,
+power, and the coordinator. A green LED uses the stack's connection flag; it is
+not proof that Home Assistant received a report.

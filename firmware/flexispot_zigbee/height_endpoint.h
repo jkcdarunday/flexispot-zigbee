@@ -1,6 +1,7 @@
 #pragma once
 #include <Zigbee.h>
 #include "config.h"
+#include "zigbee_access.h"
 
 // Analog Input with engineering_units only: Arduino's ZigbeeAnalog also inserts
 // application_type=temperature, which takes precedence over cm in ZHA.
@@ -37,7 +38,7 @@ class HeightEndpoint : public ZigbeeEP {
                                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
   }
   bool setHeight(float height) {
-    esp_zb_lock_acquire(portMAX_DELAY);
+    if (!acquireDeskZigbeeLock()) return false;
     auto ret = esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, &height, false);
     esp_zb_lock_release();
@@ -51,7 +52,7 @@ class HeightEndpoint : public ZigbeeEP {
     report.attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID;
     report.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
     report.manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC;
-    esp_zb_lock_acquire(portMAX_DELAY);
+    if (!acquireDeskZigbeeLock()) return false;
     auto ret = esp_zb_zcl_report_attr_cmd_req(&report);
     esp_zb_lock_release();
     return ret == ESP_OK;
