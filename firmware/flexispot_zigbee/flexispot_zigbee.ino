@@ -3,6 +3,11 @@
 #include <driver/gpio.h>
 #include <driver/uart.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
+#include <stdarg.h>
+#if CONFIG_PM_ENABLE
+#include <esp_pm.h>
+#endif
 #include "config.h"
 #include "desk_protocol.h"
 #include "height_endpoint.h"
@@ -34,6 +39,68 @@ QueueHandle_t requests;
 portMUX_TYPE requestMux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t acknowledgements = 0;
 bool releaseRequested = false;
+constexpr unsigned requestDepth = 8;
+
+// No heap allocation, waiting for a USB host, or filling a disconnected console.
+void logMessage(const char *format, ...) __attribute__((format(printf, 1, 2)));
+void logMessage(const char *format, ...) {
+  if (!Serial) return;
+  char text[256];
+  va_list args;
+  va_start(args, format);
+  const int count = vsnprintf(text, sizeof(text), format, args);
+  va_end(args);
+  if (count <= 0) return;
+  const size_t size = static_cast<size_t>(count) < sizeof(text) ? static_cast<size_t>(count) : sizeof(text) - 1;
+  if (Serial.availableForWrite() >= static_cast<int>(size))
+    Serial.write(reinterpret_cast<const uint8_t *>(text), size);
+}
+
+const char *resetReason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external-reset";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT: return "task-watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    default: return "other";
+  }
+}
+
+void configureLoopWatchdog(uint32_t timeoutMs) {
+  esp_task_wdt_config_t watchdog = {};
+  watchdog.timeout_ms = timeoutMs;
+  watchdog.idle_core_mask = 0;
+  watchdog.trigger_panic = true;
+  esp_err_t result = esp_task_wdt_init(&watchdog);
+  if (result == ESP_ERR_INVALID_STATE) result = esp_task_wdt_reconfigure(&watchdog);
+  ESP_ERROR_CHECK(result);
+}
+
+bool powerPolicyConfirmed = false;
+void enforceAwakePolicy(uint32_t now) {
+  if (!Zigbee.started()) return;
+  static bool attempted = false;
+  static uint32_t lastAttempt = 0;
+  if (attempted && now - lastAttempt < (powerPolicyConfirmed ? 60000u : 1000u)) return;
+  attempted = true;
+  lastAttempt = now;
+  if (!acquireDeskZigbeeLock()) return;
+  // Arduino 3.3.6's helper alone does not apply this to mains-powered endpoints.
+  esp_zb_sleep_enable(false);
+  esp_zb_set_rx_on_when_idle(true);
+  const bool rxOn = esp_zb_get_rx_on_when_idle();
+  const bool sleeping = esp_zb_sleep_is_enable();
+  esp_zb_lock_release();
+  const bool wasConfirmed = powerPolicyConfirmed;
+  powerPolicyConfirmed = rxOn && !sleeping;
+  if (!wasConfirmed || !powerPolicyConfirmed)
+    logMessage("Zigbee power: rx_idle=%u sleep=%u verified=%u\n",
+               unsigned(rxOn), unsigned(sleeping), unsigned(powerPolicyConfirmed));
+}
 
 void updateStatusLed(bool connected, bool fault = false) {
   if (STATUS_LED_PIN < 0) return;
@@ -56,8 +123,8 @@ template<unsigned Index> void onControl(bool on) {
   if (Index == 7) releaseRequested = true;  // never blocked by a full queue
   portEXIT_CRITICAL(&requestMux);
   if (Index != 7) {
-    const uint8_t command = Index;
-    xQueueSend(requests, &command, 0);  // drop excess commands, never block Zigbee
+    const desk::CommandRequest request{static_cast<desk::Command>(Index), millis()};
+    xQueueSend(requests, &request, 0);  // drop excess commands, never block Zigbee
   }
 }
 
@@ -74,9 +141,8 @@ void sendDesk(desk::Command command) {
     lastSent = command;
   }
 #if DESK_DEBUG_UART
-  Serial.print("TX:");
-  for (uint8_t b : packet) Serial.printf(" %02X", b);
-  Serial.println();
+  logMessage("TX: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+             packet[0], packet[1], packet[2], packet[3], packet[4], packet[5], packet[6], packet[7]);
 #endif
 }
 
@@ -107,6 +173,20 @@ uint8_t pendingAcks = 0;
 // Callback data is shared with the Zigbee task; protected by requestMux.
 bool probePending = false, coordinatorReplied = false;
 bool pairingChecked = false;
+uint32_t coordinatorReplies = 0, reportQueueFailures = 0, droppedCommands = 0;
+uint32_t lastHeightFrame = 0, validUartFrames = 0;
+uint32_t lastDiagnostic = 0;
+
+void printDiagnostics(uint32_t now) {
+  if (now - lastDiagnostic < 60000) return;
+  lastDiagnostic = now;
+  logMessage("Health: uptime=%lus reset=%s heap=%u min_heap=%u coord=%lu reply_age=%lus awake=%u queue_retry=%lu dropped=%lu uart=%lu height_age=%lus\n",
+      static_cast<unsigned long>(now / 1000), resetReason(), ESP.getFreeHeap(), ESP.getMinFreeHeap(),
+      static_cast<unsigned long>(coordinatorReplies),
+      static_cast<unsigned long>(connectionHealth.replyAge(now) / 1000), unsigned(powerPolicyConfirmed),
+      static_cast<unsigned long>(reportQueueFailures), static_cast<unsigned long>(droppedCommands),
+      static_cast<unsigned long>(validUartFrames), static_cast<unsigned long>((now - lastHeightFrame) / 1000));
+}
 
 void coordinatorReply(esp_zb_zdp_status_t status, uint16_t address,
                       esp_zb_af_node_desc_t *, void *) {
@@ -124,6 +204,7 @@ void checkConnection(uint32_t now, bool connected) {
   replied = coordinatorReplied;
   coordinatorReplied = false;
   portEXIT_CRITICAL(&requestMux);
+  if (Zigbee.started()) connectionHealth.stackStarted();
   // A saved network also needs recovery when rejoin never completes at boot.
   if (!pairingChecked && Zigbee.started() && acquireDeskZigbeeLock()) {
     if (!esp_zb_bdb_is_factory_new()) connectionHealth.paired(now);
@@ -131,12 +212,13 @@ void checkConnection(uint32_t now, bool connected) {
     esp_zb_lock_release();
   }
   connectionHealth.observe(now, connected);
-  if (replied) connectionHealth.reply(now);
+  if (replied) {
+    connectionHealth.reply(now);
+    ++coordinatorReplies;
+  }
   // Never accumulate requests when the stack stops invoking callbacks.
   if (connected && !pending && (!wasConnected || now - lastProbe >= 60000)) {
     lastProbe = now;
-    Serial.printf("Zigbee coordinator check: uptime=%lu s, free heap=%u\n",
-                  static_cast<unsigned long>(now / 1000), ESP.getFreeHeap());
     if (acquireDeskZigbeeLock()) {
       portENTER_CRITICAL(&requestMux);
       probePending = true;
@@ -153,7 +235,7 @@ void checkConnection(uint32_t now, bool connected) {
     digitalWrite(DESK_WAKE_PIN, HIGH);
     sendDesk(desk::Command::Release);
     uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(100));
-    Serial.println("Zigbee unreachable for five minutes; restarting with saved pairing.");
+    logMessage("Zigbee startup or reachability failed for five minutes; restarting with saved pairing.\n");
     ESP.restart();  // Never factory-reset as an automatic recovery.
   }
 }
@@ -161,17 +243,19 @@ void checkConnection(uint32_t now, bool connected) {
 
 void setup() {
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
+  Serial.setTxTimeoutMs(10);
+  logMessage("Boot: reset=%s\n", resetReason());
   if (!GPIO_IS_VALID_OUTPUT_GPIO(DESK_TX_PIN) || !GPIO_IS_VALID_GPIO(DESK_RX_PIN) ||
       !GPIO_IS_VALID_OUTPUT_GPIO(DESK_WAKE_PIN) ||
       (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
       (STATUS_LED_PIN >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))) {
-    Serial.println("Invalid GPIO configuration. Desk interface disabled.");
+    logMessage("Invalid GPIO configuration. Desk interface disabled.\n");
     if (STATUS_LED_PIN >= 0 && GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))
       updateStatusLed(false, true);
     while (true) delay(1000);
   }
   updateStatusLed(false);
-  requests = xQueueCreate(8, sizeof(uint8_t));
+  requests = xQueueCreate(requestDepth, sizeof(desk::CommandRequest));
   if (!requests) abort();
   pinMode(DESK_WAKE_PIN, OUTPUT);
   digitalWrite(DESK_WAKE_PIN, HIGH);
@@ -194,26 +278,27 @@ void setup() {
   heightSensor.setManufacturerAndModel("JKCD", "Flexispot-E7Q-H2");
   heightSensor.setPowerSource(ZB_POWER_SOURCE_MAINS);
   Zigbee.addEndpoint(&heightSensor);
+  // Keep CPU light sleep disabled too, if a future core enables power management.
+#if CONFIG_PM_ENABLE
+  static esp_pm_lock_handle_t noLightSleep;
+  ESP_ERROR_CHECK(esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "desk-awake", &noLightSleep));
+  ESP_ERROR_CHECK(esp_pm_lock_acquire(noLightSleep));
+#endif
+  configureLoopWatchdog(60000);  // includes the library's 30-second begin wait
+  enableLoopWDT();
+  connectionHealth.begin(millis());
   Zigbee.setRxOnWhenIdle(true);
   if (!Zigbee.begin()) {
     // begin() can time out while the stack is still retrying initialization
     // or a saved-network rejoin. Keep UART, LED and pairing reset responsive.
-    Serial.println("Zigbee startup pending; keeping desk interface active while the stack retries.");
+    logMessage("Zigbee startup pending; keeping desk interface active while the stack retries.\n");
   }
-  Serial.printf("Desk UART TX=%d RX=%d WAKE=%d; permit joining on your coordinator.\n",
+  logMessage("Desk UART TX=%d RX=%d WAKE=%d; permit joining on your coordinator.\n",
                 DESK_TX_PIN, DESK_RX_PIN, DESK_WAKE_PIN);
-  Serial.printf("RGB status LED GPIO=%d brightness=%d\n", STATUS_LED_PIN, STATUS_LED_BRIGHTNESS);
-  // Recover even if an SDK call stalls inside the Zigbee lock. Arduino feeds
-  // this watchdog between loop iterations, not from another task.
-  esp_task_wdt_config_t watchdog = {};
-  watchdog.timeout_ms = 30000;
-  watchdog.idle_core_mask = 0;
-  watchdog.trigger_panic = true;
-  esp_err_t watchdogResult = esp_task_wdt_init(&watchdog);
-  if (watchdogResult == ESP_ERR_INVALID_STATE)
-    watchdogResult = esp_task_wdt_reconfigure(&watchdog);
-  ESP_ERROR_CHECK(watchdogResult);
-  enableLoopWDT();
+  logMessage("RGB status LED GPIO=%d brightness=%d\n", STATUS_LED_PIN, STATUS_LED_BRIGHTNESS);
+  esp_task_wdt_reset();
+  configureLoopWatchdog(30000);
+  enforceAwakePolicy(millis());
   // No wait for pairing: serial service and reset button must keep working offline.
 }
 
@@ -221,7 +306,7 @@ void loop() {
   const uint32_t now = millis();
   const bool connected = Zigbee.connected();
   if (connected != wasConnected)
-    Serial.println(connected ? "Zigbee connected." : "Zigbee disconnected.");
+    logMessage(connected ? "Zigbee connected.\n" : "Zigbee disconnected.\n");
   bool release;
   uint8_t acks;
   portENTER_CRITICAL(&requestMux);
@@ -241,28 +326,30 @@ void loop() {
   if (previousState == desk::Controller::State::Active &&
       controller.state() == desk::Controller::State::Idle)
     sendDesk(desk::Command::Release);
-  uint8_t command;
-  while (xQueueReceive(requests, &command, 0) == pdTRUE) {
-    if (connected && !release) {
-      const bool accepted = controller.request(static_cast<desk::Command>(command), now);
-      Serial.printf("Command %u: %s\n", command + 1, accepted ? "accepted" : "busy/booting; dropped");
-    }
+  desk::CommandRequest request;
+  for (unsigned i = 0; i < requestDepth && xQueueReceive(requests, &request, 0) == pdTRUE; ++i) {
+    const bool accepted = connected && !release && controller.request(request, millis());
+    if (!accepted) ++droppedCommands;
+    logMessage("Command %u: %s\n", static_cast<unsigned>(request.command) + 1,
+               accepted ? "accepted" : "busy/offline/stale; dropped");
   }
   digitalWrite(DESK_WAKE_PIN, controller.wakeHigh() ? HIGH : LOW);
   // Limit serial work per iteration so noise cannot starve deadlines or reset handling.
   for (unsigned i = 0; i < 128 && deskSerial.available(); ++i) {
     const uint8_t byte = deskSerial.read();
 #if DESK_DEBUG_UART
-    Serial.printf("RX: %02X\n", byte);
+    logMessage("RX: %02X\n", byte);
 #endif
     desk::Event event;
     if (!parser.feed(byte, now, event)) continue;
+    ++validUartFrames;
     if (event.poll) sendDesk(controller.pollResponse());
     if (event.hasHeight) {
       const float heightCm = event.height * (DESK_DISPLAY_IN_INCHES ? 2.54f : 1.0f);
       if (!isnan(latestHeightCm) && heightCm != latestHeightCm)
         statusIndicator.heightChanged(now);
       latestHeightCm = heightCm;
+      lastHeightFrame = now;
     }
   }
   if (controller.state() == desk::Controller::State::Idle && now - lastIdlePacket >= 3000) {
@@ -276,6 +363,7 @@ void loop() {
     for (unsigned i = 0; i < 8; ++i) if (pendingAcks & (1u << i)) {
       if (controls[i]->clearPress() && (!connected || reportOff(i + 1)))
         pendingAcks &= uint8_t(~(1u << i));
+      else ++reportQueueFailures;
     }
   }
   if (connected && !isnan(latestHeightCm) &&
@@ -287,9 +375,11 @@ void loop() {
     if (heightSensor.setHeight(latestHeightCm) && heightSensor.reportHeight()) {
       reportedHeightCm = latestHeightCm;
       lastHeightReport = now;
-    }
+    } else ++reportQueueFailures;
   }
-  checkConnection(now, connected);
+  enforceAwakePolicy(millis());
+  checkConnection(millis(), connected);
+  printDiagnostics(millis());
   wasConnected = connected;
 
   static bool resetHeld = false;
@@ -300,10 +390,10 @@ void loop() {
       controller.release();
       digitalWrite(DESK_WAKE_PIN, HIGH);
       sendDesk(desk::Command::Release);
-      Serial.println("Clearing Zigbee pairing and restarting.");
+      logMessage("Clearing Zigbee pairing and restarting.\n");
       Zigbee.factoryReset();
     }
   } else resetHeld = false;
-  updateStatusLed(connected);
+  updateStatusLed(connected && connectionHealth.reachable(millis()));
   delay(1);
 }

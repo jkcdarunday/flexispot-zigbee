@@ -1,7 +1,7 @@
 #pragma once
 #include <Zigbee.h>
 
-// UART deadlines and the reset button must not wait indefinitely for the stack.
+// Never stall UART deadlines behind the stack. Callers retain work and retry.
 inline bool acquireDeskZigbeeLock() {
-  return esp_zb_lock_acquire(pdMS_TO_TICKS(50));
+  return esp_zb_lock_acquire(0);
 }

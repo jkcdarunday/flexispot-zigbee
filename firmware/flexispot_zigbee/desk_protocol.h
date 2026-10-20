@@ -81,12 +81,22 @@ class Parser {
   uint32_t lastByte_ = 0;
 };
 
+struct CommandRequest {
+  Command command;
+  uint32_t queuedAt;
+};
+
 class Controller {
  public:
   enum class State { Boot, Idle, WakeLow, WakeHigh, Active };
   Controller(uint32_t nudgeMs = 500, uint32_t presetMs = 1000)
       : nudgeMs_(nudgeMs), presetMs_(presetMs) {}
   void begin(uint32_t now) { state_ = State::Boot; since_ = now; pending_ = Command::Release; }
+  bool request(const CommandRequest &request, uint32_t now) {
+    // A delayed callback must never cause a surprise movement after a stall.
+    if (now - request.queuedAt > 1000) return false;
+    return this->request(request.command, now);
+  }
   bool request(Command command, uint32_t now) {
     if (command == Command::Release) { release(); return true; }
     // Drop requests during boot or an existing command; never extend a nudge via repeats.

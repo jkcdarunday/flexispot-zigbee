@@ -7,6 +7,11 @@ namespace desk {
 class ConnectionHealth {
  public:
   explicit ConnectionHealth(uint32_t timeoutMs = 300000) : timeoutMs_(timeoutMs) {}
+  void begin(uint32_t now) {
+    startupWatched_ = true;
+    startupAt_ = now;
+  }
+  void stackStarted() { stackReady_ = true; }
   void paired(uint32_t now) {
     if (!everConnected_) {
       everConnected_ = true;
@@ -18,15 +23,21 @@ class ConnectionHealth {
     if (!connected && wasConnected_) disconnectedSince_ = now;
     wasConnected_ = connected;
   }
-  void reply(uint32_t now) { lastReply_ = now; }
+  void reply(uint32_t now) { lastReply_ = now; hasReply_ = true; }
+  bool reachable(uint32_t now) const {
+    return hasReply_ && now - lastReply_ < 120000;
+  }
+  uint32_t replyAge(uint32_t now) const { return now - lastReply_; }
   bool needsRecovery(uint32_t now) const {
-    return everConnected_ &&
-        (now - lastReply_ >= timeoutMs_ ||
-         (!wasConnected_ && now - disconnectedSince_ >= timeoutMs_));
+    return (startupWatched_ && !stackReady_ && now - startupAt_ >= timeoutMs_) ||
+        (everConnected_ && (now - lastReply_ >= timeoutMs_ ||
+         (!wasConnected_ && now - disconnectedSince_ >= timeoutMs_)));
   }
  private:
   const uint32_t timeoutMs_;
-  bool everConnected_ = false, wasConnected_ = false;
+  bool everConnected_ = false, wasConnected_ = false, hasReply_ = false;
+  bool startupWatched_ = false, stackReady_ = false;
+  uint32_t startupAt_ = 0;
   uint32_t lastReply_ = 0, disconnectedSince_ = 0;
 };
 }  // namespace desk

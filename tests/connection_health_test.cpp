@@ -4,6 +4,20 @@
 #include "../firmware/flexispot_zigbee/connection_health.h"
 
 int main() {
+  // Initialization must recover even before connected()/paired() ever become true.
+  desk::ConnectionHealth stuckStartup;
+  stuckStartup.begin(1000);
+  stuckStartup.observe(1000, false);
+  assert(!stuckStartup.needsRecovery(300999));
+  assert(stuckStartup.needsRecovery(301000));
+
+  // A running but unpaired stack can wait for pairing indefinitely.
+  desk::ConnectionHealth waitingToPair;
+  waitingToPair.begin(0);
+  waitingToPair.stackStarted();
+  waitingToPair.observe(24 * 3600000, false);
+  assert(!waitingToPair.needsRecovery(24 * 3600000));
+
   desk::ConnectionHealth unpaired;
   unpaired.observe(0, false);
   unpaired.observe(3600000, false);
@@ -23,12 +37,29 @@ int main() {
   assert(silent.needsRecovery(301000));
 
   desk::ConnectionHealth healthy;
+  healthy.begin(0);
+  healthy.stackStarted();
   healthy.observe(1000, true);
-  for (uint32_t now = 61000; now < 24 * 3600000; now += 60000) {
+  assert(!healthy.reachable(1000));  // Cached connected flag isn't a reply.
+  for (uint32_t now = 61000; now < 72 * 3600000; now += 60000) {
     healthy.observe(now, true);
     healthy.reply(now);
     assert(!healthy.needsRecovery(now));
+    assert(healthy.reachable(now));
   }
+
+  desk::ConnectionHealth lostReply;
+  lostReply.observe(1000, true);
+  lostReply.reply(1000);
+  assert(lostReply.reachable(120999));
+  assert(!lostReply.reachable(121000));
+  assert(!lostReply.needsRecovery(300999));
+  assert(lostReply.needsRecovery(301000));
+
+  desk::ConnectionHealth startupWrap;
+  startupWrap.begin(UINT32_MAX - 99999);
+  assert(!startupWrap.needsRecovery(199999));
+  assert(startupWrap.needsRecovery(200000));
 
   desk::ConnectionHealth offline;
   offline.observe(1000, true);

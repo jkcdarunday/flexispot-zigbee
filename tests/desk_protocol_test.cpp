@@ -76,5 +76,21 @@ int main() {
   controller.tick(49); assert(controller.wakeHigh());
   controller.tick(1149); assert(controller.pollResponse() == Command::Up);
   controller.tick(1649); assert(controller.pollResponse() == Command::Release);
+  Controller configured(2000, 1000);
+  configured.begin(0);
+  configured.tick(10000);
+  // A queued request older than one second must not start a delayed movement.
+  assert(!configured.request(CommandRequest{Command::Up, 10000}, 11001));
+  assert(configured.state() == Controller::State::Idle);
+  assert(configured.request(CommandRequest{Command::Up, 11000}, 11001));
+  configured.tick(11101);
+  configured.tick(12201);
+  configured.tick(14200);
+  assert(configured.pollResponse() == Command::Up);
+  configured.tick(14201);
+  assert(configured.pollResponse() == Command::Release);
+  assert(!configured.request(CommandRequest{Command::Down, UINT32_MAX - 499}, 501));
+  assert(configured.request(CommandRequest{Command::Down, UINT32_MAX - 499}, 500));
+  configured.release();
   puts("Desk protocol/state tests passed (including malformed frames and timer rollover).");
 }

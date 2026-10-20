@@ -286,8 +286,8 @@ GPIO8 is independent of the desk's wake signal on GPIO12.
 
 | Indication | Meaning |
 | --- | --- |
-| Dim green | Zigbee stack reports connected to the network |
-| Blinking amber | Disconnected / waiting to join or reconnect |
+| Dim green | Stack is connected and the coordinator replied within the last two minutes |
+| Blinking amber | Waiting for a coordinator reply, or disconnected / reconnecting |
 | Three quick purple flashes | A desk command starts transmitting, or Release keys was requested |
 | Brief cyan flash | A new valid height differs from the previous reading |
 | Red | Invalid GPIO configuration; desk interface disabled |
@@ -300,14 +300,17 @@ the first height reading at startup and repeated identical readings do not flash
 Purple takes priority when command and height events overlap. Status returns to
 the connection color after the flashes. Height changes can flash while disconnected.
 
-Connection means network membership according to the Zigbee stack; it does not
-confirm Home Assistant is running or that the desk UART is responding. LED timing
+Green requires a recent coordinator response, rather than only the stack's cached
+connection flag. It does not confirm Home Assistant processed a report or that
+the desk UART is responding. LED timing
 uses the normal firmware loop and adds no blink delays to desk control. This is a
 local indicator only and does not add a Home Assistant light entity. Updating this
 version keeps the same switch descriptors and does not require another re-pair.
 If Zigbee's initial startup/rejoin wait times out, the firmware keeps its desk
 interface, status LED, and reset button running while the initialized Zigbee stack
-retries; a startup timeout does not force a reboot or clear the saved pairing.
+retries. A stack that never finishes initializing is restarted after five minutes;
+a blocked startup call is covered by a separate 60-second watchdog. Neither
+recovery clears the saved pairing.
 
 ## Troubleshooting and development
 
@@ -360,21 +363,47 @@ and [Zigbee2MQTT modern extensions](https://github.com/Koenkk/zigbee-herdsman-co
 
 ### Recovery from a lost Zigbee connection
 
+The bridge directly disables Zigbee sleep and enables the receiver while idle,
+then reads both settings back. It reasserts and verifies them every minute. This
+is necessary because Arduino-ESP32 3.3.6's `setRxOnWhenIdle()` only stores a flag;
+the library uses it in a battery-device workaround, not to directly set the
+receiver on our mains-powered endpoints. The pinned H2 SDK disables CPU power
+management at build time. A no-light-sleep lock also protects future builds where
+that feature is enabled. The bridge remains a Zigbee end device, with its
+existing parent keepalive settings, and does not require switching to a router
+or deleting the saved pairing.
+
 The bridge queries the coordinator once per minute. If it has joined a network
 but receives no successful coordinator reply for five minutes, it releases its
 emulated desk key and restarts using the saved pairing. An unpaired bridge does
 not repeatedly restart. This check does not rely on queued reports or Arduino's
 cached connection flag as proof of delivery. Only one query can be outstanding.
 
-Zigbee lock waits are limited to 50 ms so a busy stack cannot indefinitely block
-the UART service, status LED, or BOOT button. Failed height/OFF report attempts
+Zigbee lock acquisition is nonblocking, so repeated lock contention cannot add
+up to long delays in the UART service, status LED, or BOOT button. Failed height/OFF report attempts
 are limited to once per second, with pending OFF acknowledgements retained.
-A 30-second loop watchdog also restarts the bridge if an SDK call stalls. These
+A watchdog covers startup with a 60-second limit, then switches to 30 seconds
+for the loop if an SDK call stalls. A five-minute initialization deadline covers
+a stack that returns from startup but never becomes ready. A functioning unpaired
+stack can still wait indefinitely for pairing. These
 recoveries preserve Zigbee pairing; holding BOOT remains the explicit reset.
 A prolonged coordinator outage can result in another recovery five minutes
 after rejoining. Rebooting releases bridge keys but is not a guaranteed motor
 stop for a preset already activated in the desk controller.
 
 If an outage persists, capture the USB serial log and check signal strength,
-power, and the coordinator. A green LED uses the stack's connection flag; it is
-not proof that Home Assistant received a report.
+power, and the coordinator. Once per minute, a `Health:` line includes uptime,
+reset reason, current/minimum heap, coordinator reply count and age, verified
+awake policy, report queue retries, dropped commands, received UART frames, and
+time since the last height frame. Reply age is meaningful after the first reply;
+height age is meaningful after a valid height has been received. Queue retry
+counts include temporary lock contention, not just radio problems.
+
+Application logging uses a fixed buffer, skips disconnected USB consoles, and
+drops log lines rather than waiting for buffer space. Debug logging can still
+affect timing when a host is connected; leave raw UART logging off for normal use.
+Only eight queued commands are processed per loop, and movement requests older
+than one second are dropped. Release remains independent of the command queue.
+
+The [2026-10-21 reliability review](docs/reliability-review-2026-10-21.md) records
+the findings, changes, and the limits of software-only validation.
