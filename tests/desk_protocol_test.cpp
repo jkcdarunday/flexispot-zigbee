@@ -92,5 +92,23 @@ int main() {
   assert(!configured.request(CommandRequest{Command::Down, UINT32_MAX - 499}, 501));
   assert(configured.request(CommandRequest{Command::Down, UINT32_MAX - 499}, 500));
   configured.release();
+  Controller buffered(2000, 1000);
+  buffered.begin(0);
+  buffered.request(Command::Release, 1);
+  assert(buffered.state() == Controller::State::Boot);
+  assert(!buffered.request(Command::Up, 9999));
+  buffered.tick(10000);
+  assert(buffered.request(Command::Up, 10000));
+  buffered.tick(10100); buffered.tick(11200);
+  assert(buffered.pollResponse(13199) == Command::Up);
+  // No outer-loop tick between buffered polls: response must still expire on time.
+  assert(buffered.pollResponse(13200) == Command::Release);
+  assert(buffered.request(Command::Down, 14000));
+  buffered.tick(17000);
+  assert(buffered.state() == Controller::State::Idle); // Abandon a stalled wake.
+  assert(buffered.request(Command::Down, 18000));
+  buffered.tick(18100);
+  assert(buffered.pollResponse(21000) == Command::Release);
+  assert(buffered.state() == Controller::State::Idle);
   puts("Desk protocol/state tests passed (including malformed frames and timer rollover).");
 }

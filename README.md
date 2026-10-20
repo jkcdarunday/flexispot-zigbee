@@ -304,7 +304,10 @@ Green requires a recent coordinator response, rather than only the stack's cache
 connection flag. It does not confirm Home Assistant processed a report or that
 the desk UART is responding. LED timing
 uses the normal firmware loop and adds no blink delays to desk control. This is a
-local indicator only and does not add a Home Assistant light entity. Updating this
+local indicator only and does not add a Home Assistant light entity. LED output
+uses asynchronous RMT with a persistent payload. If completion does not arrive
+within 50 ms, LED updates are disabled until reboot (`led_fail=1` in diagnostics);
+the UART and Zigbee loop continue. The watchdog also covers driver initialization. Updating this
 version keeps the same switch descriptors and does not require another re-pair.
 If Zigbee's initial startup/rejoin wait times out, the firmware keeps its desk
 interface, status LED, and reset button running while the initialized Zigbee stack
@@ -399,11 +402,30 @@ time since the last height frame. Reply age is meaningful after the first reply;
 height age is meaningful after a valid height has been received. Queue retry
 counts include temporary lock contention, not just radio problems.
 
+Desk UART writes bypass Arduino's blocking write wrapper. With software TX
+buffering disabled, a packet is sent only when the previous frame has drained.
+Busy polls do not accumulate queued keypresses. Release is retained and retried
+before any new active key; a partial write schedules two Release frames to
+recover framing. Any short write also cancels the active movement. A transmitter
+that stays busy for one second, or repeatedly short-writes three times without a
+successful frame, triggers a restart with saved pairing. Recovery/manual reset
+wait only bounded intervals to flush the
+Release before rebooting. UART write errors and backpressure appear as `tx_err`
+and `tx_busy`; the latter can increase during poll floods without indicating a
+hardware fault. These checks do not establish that the desk acted on a packet.
+
 Application logging uses a fixed buffer, skips disconnected USB consoles, and
 drops log lines rather than waiting for buffer space. Debug logging can still
 affect timing when a host is connected; leave raw UART logging off for normal use.
 Only eight queued commands are processed per loop, and movement requests older
-than one second are dropped. Release remains independent of the command queue.
+than one second are dropped. Release remains independent of the command queue
+and cannot bypass the ten-second startup guard. Each poll rechecks the movement
+deadline using fresh time, including polls received in the same buffered batch.
+A wake sequence stalled for more than 2.2 seconds is abandoned rather than
+starting a delayed movement. Wake GPIO changes are applied before command logs.
+
+Diagnostic time fields `up_s`, `reply_s`, and `height_s` are in seconds. `retry`
+counts report queue retries. `led_fail` flags a disabled/faulted LED driver.
 
 The [2026-10-21 reliability review](docs/reliability-review-2026-10-21.md) records
 the findings, changes, and the limits of software-only validation.

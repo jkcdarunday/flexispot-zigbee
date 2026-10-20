@@ -52,3 +52,37 @@ the outage resolved, flash the reviewed build, verify `rx_idle=1 sleep=0` and
 advancing coordinator replies, then run beyond the previous failure interval
 on the actual desk power/wiring. Capture a status log if it fails. Unstable
 power, intermittent wiring, RF conditions and SDK defects remain possible.
+
+## Second pass before flashing
+
+Additional findings and fixes:
+
+| Finding | Impact | Change |
+| --- | --- | --- |
+| `rgbLedWriteOrdered()` calls `rmtWrite(..., RMT_WAIT_FOR_EVER)` in the pinned core. | A missing transmission completion could stop the entire main loop. The first LED update also preceded watchdog registration. | Use one asynchronous RMT transfer with a persistent, non-copyable payload owner. Disable the cosmetic LED after a missing completion, without freeing or reusing an in-flight payload. Arm the startup watchdog before all application peripheral initialization. |
+| `HardwareSerial::write()` always returns the requested length, while its lower layer calls blocking `uart_write_bytes()`. | The previous apparent success check could not detect driver errors; a poll flood could hold the loop in transmit waits or build a stale TX FIFO backlog. | Use `uart_wait_tx_done(..., 0)` and `uart_tx_chars()` with software TX buffering disabled. Keep only one frame in flight. Preserve Release while busy, prioritize it over new active keys, cancel the active command on a short write and send two Release frames to resynchronize framing. Detect a one-second TX stall or three consecutive failed writes and recover with saved pairing. |
+| Controller expiration was checked once per outer loop. | A delayed/buffered poll batch could still obtain an active command after its duration elapsed. Wake GPIO writes could also be delayed by logging after the timer had already started. | Check the timer with fresh time for every poll and immediately update wake GPIO. Apply wake transitions/request GPIO changes before command logs. |
+| `release()` unconditionally changed Boot to Idle. | A Release during startup bypassed the documented ten-second movement guard. | Preserve Boot when releasing a key; release remains available during startup. |
+| A wake sequence could resume after a multi-second processing stall. | The bridge could start a movement long after accepting the original request, even though the command queue itself had an age limit. | Abandon wake sequences delayed beyond the nominal 1.2-second sequence plus a one-second grace interval. |
+
+Validation adds mocked RMT completion loss, persistent-buffer checks, all six
+color orders, brightness and timer rollover, 100,000 busy UART polls, priority
+Release, every partial UART write length from zero to seven bytes with wire
+resynchronization, stuck/busy versus drained UART distinctions, TX fault timing
+across clock rollover, consecutive failure recovery, buffered-poll expiration, stalled wake abandonment, and
+startup-guard preservation. Hardware mocks validate failure handling and do not
+simulate RF, electrical behavior, or actual interrupt timing. The H2 firmware
+compile verifies the real SDK interfaces.
+
+Upstream implementations inspected:
+- [Arduino RGB LED helper](https://github.com/espressif/arduino-esp32/blob/3.3.6/cores/esp32/esp32-hal-rgb-led.c)
+- [Arduino RMT driver](https://github.com/espressif/arduino-esp32/blob/3.3.6/cores/esp32/esp32-hal-rmt.c)
+- [Arduino HardwareSerial](https://github.com/espressif/arduino-esp32/blob/3.3.6/cores/esp32/HardwareSerial.cpp)
+- [ESP-IDF 5.5.2 UART implementation](https://github.com/espressif/esp-idf/blob/v5.5.2/components/esp_driver_uart/src/uart.c) and the pinned UART header document `uart_tx_chars()` as nonblocking and
+  requiring disabled software TX buffering. This application has one UART TX
+  owner; callbacks never write to the desk. SDK-internal mutex failures still
+  require watchdog recovery.
+
+The UART timing/transport and LED output changes need bench verification on the
+actual desk before a long soak. The two-second Up/Down setting and Zigbee
+descriptors remain unchanged. No flashing was performed in this pass.

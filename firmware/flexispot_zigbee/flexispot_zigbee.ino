@@ -15,6 +15,8 @@
 #include "status_indicator.h"
 #include "connection_health.h"
 #include "zigbee_access.h"
+#include "desk_transmitter.h"
+#include "status_led_output.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32H2)
 #error "Select ESP32H2 Dev Module"
@@ -25,6 +27,18 @@
 
 // Always-awake end device: mains powered, without acting as a mesh router.
 HardwareSerial deskSerial(1);
+struct DeskUartDriver {
+  uint32_t now() const { return millis(); }
+  bool ready() {
+    return deskSerial && uart_wait_tx_done(UART_NUM_1, 0) == ESP_OK;
+  }
+  size_t write(const uint8_t *data, size_t size) {
+    const int written = uart_tx_chars(UART_NUM_1, reinterpret_cast<const char *>(data), size);
+    return written > 0 ? static_cast<size_t>(written) : 0;
+  }
+} deskUartDriver;
+desk::DeskTransmitter<DeskUartDriver> deskTransmitter(deskUartDriver);
+desk::StatusLedOutput statusLed(STATUS_LED_PIN, STATUS_LED_COLOR_ORDER, STATUS_LED_BRIGHTNESS);
 desk::Parser parser;
 desk::Controller controller(DESK_NUDGE_MS, DESK_PRESET_HOLD_MS);
 desk::StatusIndicator statusIndicator;
@@ -105,15 +119,7 @@ void enforceAwakePolicy(uint32_t now) {
 void updateStatusLed(bool connected, bool fault = false) {
   if (STATUS_LED_PIN < 0) return;
   const auto color = statusIndicator.color(millis(), connected, fault);
-  static desk::LedColor previous = {0, 0, 0};
-  static bool initialized = false;
-  if (initialized && color == previous) return;
-  rgbLedWriteOrdered(STATUS_LED_PIN, STATUS_LED_COLOR_ORDER,
-      uint16_t(color.red) * STATUS_LED_BRIGHTNESS / 255,
-      uint16_t(color.green) * STATUS_LED_BRIGHTNESS / 255,
-      uint16_t(color.blue) * STATUS_LED_BRIGHTNESS / 255);
-  previous = color;
-  initialized = true;
+  statusLed.show(color, millis());
 }
 
 template<unsigned Index> void onControl(bool on) {
@@ -128,22 +134,40 @@ template<unsigned Index> void onControl(bool on) {
   }
 }
 
-void sendDesk(desk::Command command) {
-  uint8_t packet[8];
-  desk::commandPacket(command, packet);
-  const size_t written = deskSerial.write(packet, sizeof(packet));
-  static desk::Command lastSent = desk::Command::Release;
-  if (written == sizeof(packet)) {
-    // Only the first active reply flashes; repeated poll replies and idle
-    // keepalives must not continually retrigger the LED.
-    if (command != desk::Command::Release && command != lastSent)
-      statusIndicator.commandSent(millis());
-    lastSent = command;
+bool sendDesk(desk::Command command) {
+  const auto previous = deskTransmitter.lastSent();
+  const uint32_t errorsBefore = deskTransmitter.errorCount();
+  if (!deskTransmitter.send(command)) {
+    if (deskTransmitter.errorCount() != errorsBefore) {
+      controller.release();
+      xQueueReset(requests);
+      digitalWrite(DESK_WAKE_PIN, HIGH);
+    }
+    return false;
   }
+  const auto actual = deskTransmitter.lastSent();
+  if (actual != desk::Command::Release && actual != previous)
+    statusIndicator.commandSent(millis());
 #if DESK_DEBUG_UART
+  uint8_t packet[8];
+  desk::commandPacket(actual, packet);
   logMessage("TX: %02X %02X %02X %02X %02X %02X %02X %02X\n",
              packet[0], packet[1], packet[2], packet[3], packet[4], packet[5], packet[6], packet[7]);
 #endif
+  return true;
+}
+
+void releaseDeskForRestart() {
+  controller.release();
+  xQueueReset(requests);
+  digitalWrite(DESK_WAKE_PIN, HIGH);
+  // Drain at most one in-flight frame, then send the retained Release.
+  sendDesk(desk::Command::Release);
+  for (unsigned i = 0; i < 2 && deskTransmitter.releasePending(); ++i) {
+    if (uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(25)) != ESP_OK) break;
+    sendDesk(desk::Command::Release);
+  }
+  uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(25));
 }
 
 bool reportOff(uint8_t endpoint) {
@@ -180,12 +204,14 @@ uint32_t lastDiagnostic = 0;
 void printDiagnostics(uint32_t now) {
   if (now - lastDiagnostic < 60000) return;
   lastDiagnostic = now;
-  logMessage("Health: uptime=%lus reset=%s heap=%u min_heap=%u coord=%lu reply_age=%lus awake=%u queue_retry=%lu dropped=%lu uart=%lu height_age=%lus\n",
-      static_cast<unsigned long>(now / 1000), resetReason(), ESP.getFreeHeap(), ESP.getMinFreeHeap(),
+  logMessage("Health: up_s=%lu reset=%s heap=%u min_heap=%u coord=%lu reply_s=%lu awake=%u retry=%lu dropped=%lu uart=%lu height_s=%lu led_fail=%u tx_err=%lu tx_busy=%lu\n",
+      static_cast<unsigned long>(now / 1000), resetReason(), unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
       static_cast<unsigned long>(coordinatorReplies),
       static_cast<unsigned long>(connectionHealth.replyAge(now) / 1000), unsigned(powerPolicyConfirmed),
       static_cast<unsigned long>(reportQueueFailures), static_cast<unsigned long>(droppedCommands),
-      static_cast<unsigned long>(validUartFrames), static_cast<unsigned long>((now - lastHeightFrame) / 1000));
+      static_cast<unsigned long>(validUartFrames), static_cast<unsigned long>((now - lastHeightFrame) / 1000),
+      unsigned(statusLed.failed()), static_cast<unsigned long>(deskTransmitter.errorCount()),
+      static_cast<unsigned long>(deskTransmitter.busyCount()));
 }
 
 void coordinatorReply(esp_zb_zdp_status_t status, uint16_t address,
@@ -230,11 +256,7 @@ void checkConnection(uint32_t now, bool connected) {
     }
   }
   if (connectionHealth.needsRecovery(now)) {
-    controller.release();
-    xQueueReset(requests);
-    digitalWrite(DESK_WAKE_PIN, HIGH);
-    sendDesk(desk::Command::Release);
-    uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(100));
+    releaseDeskForRestart();
     logMessage("Zigbee startup or reachability failed for five minutes; restarting with saved pairing.\n");
     ESP.restart();  // Never factory-reset as an automatic recovery.
   }
@@ -242,6 +264,9 @@ void checkConnection(uint32_t now, bool connected) {
 
 
 void setup() {
+  // Arm before USB, LED, UART or Zigbee initialization can stall.
+  configureLoopWatchdog(60000);
+  enableLoopWDT();
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
   Serial.setTxTimeoutMs(10);
   logMessage("Boot: reset=%s\n", resetReason());
@@ -250,17 +275,26 @@ void setup() {
       (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
       (STATUS_LED_PIN >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))) {
     logMessage("Invalid GPIO configuration. Desk interface disabled.\n");
-    if (STATUS_LED_PIN >= 0 && GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN))
+    if (STATUS_LED_PIN >= 0 && GPIO_IS_VALID_OUTPUT_GPIO(STATUS_LED_PIN)) {
+      statusLed.begin();
       updateStatusLed(false, true);
-    while (true) delay(1000);
+    }
+    while (true) { esp_task_wdt_reset(); delay(1000); }
   }
+  statusLed.begin();
   updateStatusLed(false);
   requests = xQueueCreate(requestDepth, sizeof(desk::CommandRequest));
   if (!requests) abort();
   pinMode(DESK_WAKE_PIN, OUTPUT);
   digitalWrite(DESK_WAKE_PIN, HIGH);
   if (RESET_BUTTON_PIN >= 0) pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  // uart_tx_chars() is nonblocking and requires no software TX ring buffer.
+  deskSerial.setTxBufferSize(0);
   deskSerial.begin(9600, SERIAL_8N1, DESK_RX_PIN, DESK_TX_PIN);
+  if (!deskSerial) {
+    logMessage("Desk UART initialization failed.\n");
+    abort();
+  }
   controller.begin(millis());
   standControl.onPress(onControl<0>);
   sitControl.onPress(onControl<1>);
@@ -284,8 +318,6 @@ void setup() {
   ESP_ERROR_CHECK(esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "desk-awake", &noLightSleep));
   ESP_ERROR_CHECK(esp_pm_lock_acquire(noLightSleep));
 #endif
-  configureLoopWatchdog(60000);  // includes the library's 30-second begin wait
-  enableLoopWDT();
   connectionHealth.begin(millis());
   Zigbee.setRxOnWhenIdle(true);
   if (!Zigbee.begin()) {
@@ -322,14 +354,16 @@ void loop() {
     if (release) statusIndicator.commandSent(millis());
   }
   const auto previousState = controller.state();
-  controller.tick(now);  // deadlines checked before processing incoming polls
+  controller.tick(millis());  // use fresh time after any earlier logging
+  digitalWrite(DESK_WAKE_PIN, controller.wakeHigh() ? HIGH : LOW);
   if (previousState == desk::Controller::State::Active &&
       controller.state() == desk::Controller::State::Idle)
     sendDesk(desk::Command::Release);
   desk::CommandRequest request;
   for (unsigned i = 0; i < requestDepth && xQueueReceive(requests, &request, 0) == pdTRUE; ++i) {
     const bool accepted = connected && !release && controller.request(request, millis());
-    if (!accepted) ++droppedCommands;
+    if (accepted) digitalWrite(DESK_WAKE_PIN, controller.wakeHigh() ? HIGH : LOW);
+    else ++droppedCommands;
     logMessage("Command %u: %s\n", static_cast<unsigned>(request.command) + 1,
                accepted ? "accepted" : "busy/offline/stale; dropped");
   }
@@ -343,7 +377,11 @@ void loop() {
     desk::Event event;
     if (!parser.feed(byte, now, event)) continue;
     ++validUartFrames;
-    if (event.poll) sendDesk(controller.pollResponse());
+    if (event.poll) {
+      const auto response = controller.pollResponse(millis());
+      digitalWrite(DESK_WAKE_PIN, controller.wakeHigh() ? HIGH : LOW);
+      sendDesk(response);
+    }
     if (event.hasHeight) {
       const float heightCm = event.height * (DESK_DISPLAY_IN_INCHES ? 2.54f : 1.0f);
       if (!isnan(latestHeightCm) && heightCm != latestHeightCm)
@@ -356,6 +394,7 @@ void loop() {
     sendDesk(desk::Command::Release);
     lastIdlePacket = now;
   }
+  if (deskTransmitter.releasePending()) sendDesk(desk::Command::Release);
   pendingAcks |= acks;
   if (pendingAcks && (!ackAttempted || now - lastAckAttempt >= 1000)) {
     ackAttempted = true;
@@ -377,6 +416,11 @@ void loop() {
       lastHeightReport = now;
     } else ++reportQueueFailures;
   }
+  if (deskTransmitter.faulted()) {
+    releaseDeskForRestart();
+    logMessage("Desk UART stalled or repeatedly failed; restarting with saved pairing.\n");
+    ESP.restart();
+  }
   enforceAwakePolicy(millis());
   checkConnection(millis(), connected);
   printDiagnostics(millis());
@@ -387,9 +431,7 @@ void loop() {
   if (RESET_BUTTON_PIN >= 0 && digitalRead(RESET_BUTTON_PIN) == LOW) {
     if (!resetHeld) { resetHeld = true; resetSince = now; }
     if (now - resetSince >= 5000) {
-      controller.release();
-      digitalWrite(DESK_WAKE_PIN, HIGH);
-      sendDesk(desk::Command::Release);
+      releaseDeskForRestart();
       logMessage("Clearing Zigbee pairing and restarting.\n");
       Zigbee.factoryReset();
     }

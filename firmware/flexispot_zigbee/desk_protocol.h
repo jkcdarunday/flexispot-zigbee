@@ -101,11 +101,16 @@ class Controller {
     if (command == Command::Release) { release(); return true; }
     // Drop requests during boot or an existing command; never extend a nudge via repeats.
     if (static_cast<unsigned>(command) >= 7 || state_ != State::Idle) return false;
-    pending_ = command; state_ = State::WakeLow; since_ = now;
+    pending_ = command; state_ = State::WakeLow; since_ = requestedAt_ = now;
     return true;
   }
-  void release() { pending_ = Command::Release; state_ = State::Idle; }
+  void release() {
+    pending_ = Command::Release;
+    if (state_ != State::Boot) state_ = State::Idle;
+  }
   void tick(uint32_t now) {
+    if ((state_ == State::WakeLow || state_ == State::WakeHigh) &&
+        now - requestedAt_ > 2200) { release(); return; }
     const uint32_t elapsed = now - since_;
     if (state_ == State::Boot && elapsed >= 10000) state_ = State::Idle;
     else if (state_ == State::WakeLow && elapsed >= 100) { state_ = State::WakeHigh; since_ = now; }
@@ -117,11 +122,15 @@ class Controller {
   }
   bool wakeHigh() const { return state_ != State::WakeLow; }
   Command pollResponse() const { return state_ == State::Active ? pending_ : Command::Release; }
+  Command pollResponse(uint32_t now) {
+    tick(now);  // Recheck deadlines for each poll, including buffered batches.
+    return pollResponse();
+  }
   State state() const { return state_; }
  private:
   State state_ = State::Boot;
   Command pending_ = Command::Release;
-  uint32_t since_ = 0;
+  uint32_t since_ = 0, requestedAt_ = 0;
   uint32_t nudgeMs_, presetMs_;
 };
 }  // namespace desk
