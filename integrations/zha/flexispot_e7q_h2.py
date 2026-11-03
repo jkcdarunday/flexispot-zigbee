@@ -5,6 +5,7 @@ import enum
 import zigpy.types as t
 from zigpy.zcl.clusters.general import AnalogInput, OnOff
 from zigpy.zcl.foundation import ZCLAttributeDef
+from zigpy.zcl import ReportingConfig
 from zhaquirks.clusters import CustomCluster
 from zha.application import EntityPlatform
 from zha.application.platforms.sensor.const import SensorDeviceClass, SensorStateClass
@@ -87,18 +88,21 @@ builder.prevent_default_entity_creation(
 builder.sensor(
     attribute_name="present_value", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
     unit="s", device_class=SensorDeviceClass.DURATION,
+    reporting_config=ReportingConfig(min_interval=30, max_interval=60, reportable_change=30),
     state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=0,
     entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_uptime",
     translation_key="flexispot_uptime", fallback_name="Uptime",
 ).sensor(
     attribute_name="boot_count", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
     attribute_converter=boot_count_or_unknown,
+    reporting_config=ReportingConfig(min_interval=30, max_interval=60, reportable_change=1),
     state_class=SensorStateClass.TOTAL_INCREASING, suggested_display_precision=0,
     entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_boot_count",
     translation_key="flexispot_boot_count", fallback_name="Boot count",
 ).enum(
     attribute_name="reset_reason", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
     enum_class=ResetReason, entity_platform=EntityPlatform.SENSOR,
+    reporting_config=ReportingConfig(min_interval=30, max_interval=60, reportable_change=1),
     entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_reset_reason",
     translation_key="flexispot_reset_reason", fallback_name="Last restart reason",
 )

@@ -24,6 +24,11 @@ assert set(metadata) == {"present_value", "boot_count", "reset_reason"}
 assert all(item.entity_platform == EntityPlatform.SENSOR for item in metadata.values())
 assert all(item.entity_type == EntityType.DIAGNOSTIC for item in metadata.values())
 assert all(not item.initially_disabled for item in metadata.values())
+# Explicit reporting is required: ZHA only binds custom sensor clusters when
+# reporting_config is present. Otherwise unsolicited firmware reports are lost.
+assert all(item.reporting_config is not None for item in metadata.values())
+assert all(item.reporting_config.min_interval == 30 for item in metadata.values())
+assert all(item.reporting_config.max_interval == 60 for item in metadata.values())
 assert metadata["present_value"].unit == "s"
 assert metadata["present_value"].device_class == SensorDeviceClass.DURATION
 assert metadata["present_value"].state_class == SensorStateClass.MEASUREMENT
