@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Preferences.h>
+#include <esp_timer.h>
 #include <Zigbee.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
@@ -11,6 +13,8 @@
 #include "config.h"
 #include "desk_protocol.h"
 #include "height_endpoint.h"
+#include "diagnostic_endpoint.h"
+#include "device_diagnostics.h"
 #include "desk_control.h"
 #include "status_indicator.h"
 #include "connection_health.h"
@@ -51,6 +55,9 @@ desk::Parser parser;
 desk::Controller controller(DESK_NUDGE_MS, DESK_PRESET_HOLD_MS);
 desk::StatusIndicator statusIndicator;
 HeightEndpoint heightSensor(9);
+DiagnosticEndpoint diagnosticSensor(10);
+desk::DiagnosticsSchedule diagnosticSchedule;
+uint32_t bootCountValue = 0;
 DeskControl standControl(1), sitControl(2), preset1Control(3), preset2Control(4);
 DeskControl upControl(5), downControl(6), memoryControl(7), releaseControl(8);
 DeskControl *controls[] = {&standControl, &sitControl, &preset1Control, &preset2Control,
@@ -88,8 +95,33 @@ const char *resetReason() {
     case ESP_RST_TASK_WDT: return "task-watchdog";
     case ESP_RST_WDT: return "watchdog";
     case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_SDIO: return "sdio";
+    case ESP_RST_USB: return "usb";
+    case ESP_RST_JTAG: return "jtag";
+    case ESP_RST_EFUSE: return "efuse";
+    case ESP_RST_PWR_GLITCH: return "power-glitch";
+    case ESP_RST_CPU_LOCKUP: return "cpu-lockup";
     default: return "other";
   }
+}
+
+void recordBoot() {
+  Preferences preferences;
+  if (!preferences.begin("desk_diag", false)) {
+    logMessage("Boot counter unavailable: could not open NVS.\n");
+    return;
+  }
+  uint32_t count = preferences.getUInt("boots", 0);
+  if (count != UINT32_MAX) ++count;
+  // One NVS write per boot, never periodic writes from the main loop.
+  if (preferences.putUInt("boots", count) == sizeof(count)) {
+    bootCountValue = count;
+    logMessage("Boot count: %lu\n", static_cast<unsigned long>(count));
+  } else {
+    logMessage("Boot counter unavailable: NVS write failed.\n");
+  }
+  preferences.end();
 }
 
 void configureLoopWatchdog(uint32_t timeoutMs) {
@@ -209,11 +241,27 @@ uint32_t coordinatorReplies = 0, reportQueueFailures = 0, droppedCommands = 0;
 uint32_t lastHeightFrame = 0, validUartFrames = 0;
 uint32_t lastDiagnostic = 0;
 
+void serviceDeviceDiagnostics(uint32_t now, bool connected) {
+  if (!Zigbee.started()) return;
+  const uint8_t pending = diagnosticSchedule.reportsDue(now, connected);
+  if (!diagnosticSchedule.refreshDue(now) && !pending) return;
+  const bool results[] = {
+      diagnosticSensor.updateUptime(desk::uptimeSeconds(static_cast<uint64_t>(esp_timer_get_time())), pending & 1),
+      diagnosticSensor.updateBootCount(bootCountValue, pending & 2),
+      diagnosticSensor.updateResetReason(static_cast<uint8_t>(esp_reset_reason()), pending & 4)};
+  for (unsigned i = 0; i < 3; ++i) {
+    const bool report = pending & (1u << i);
+    if (results[i]) {
+      if (report) diagnosticSchedule.reported(i);
+    } else if (report) ++reportQueueFailures;
+  }
+}
+
 void printDiagnostics(uint32_t now) {
   if (now - lastDiagnostic < 60000) return;
   lastDiagnostic = now;
-  logMessage("Health: up_s=%lu reset=%s heap=%u min_heap=%u coord=%lu reply_s=%lu awake=%u retry=%lu dropped=%lu uart=%lu height_s=%lu led_fail=%u tx_err=%lu tx_busy=%lu\n",
-      static_cast<unsigned long>(now / 1000), resetReason(), unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
+  logMessage("Health: up_s=%llu reset=%s heap=%u min_heap=%u coord=%lu reply_s=%lu awake=%u retry=%lu dropped=%lu uart=%lu height_s=%lu led_fail=%u tx_err=%lu tx_busy=%lu\n",
+      static_cast<unsigned long long>(esp_timer_get_time() / 1000000), resetReason(), unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
       static_cast<unsigned long>(coordinatorReplies),
       static_cast<unsigned long>(connectionHealth.replyAge(now) / 1000), unsigned(powerPolicyConfirmed),
       static_cast<unsigned long>(reportQueueFailures), static_cast<unsigned long>(droppedCommands),
@@ -278,6 +326,7 @@ void setup() {
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
   Serial.setTxTimeoutMs(10);
   logMessage("Boot: reset=%s Zigbee_role=%s\n", resetReason(), deskZigbeeRoleName);
+  recordBoot();
   if (!GPIO_IS_VALID_OUTPUT_GPIO(DESK_TX_PIN) || !GPIO_IS_VALID_GPIO(DESK_RX_PIN) ||
       !GPIO_IS_VALID_OUTPUT_GPIO(DESK_WAKE_PIN) ||
       (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
@@ -320,6 +369,9 @@ void setup() {
   heightSensor.setManufacturerAndModel("JKCD", "Flexispot-E7Q-H2");
   heightSensor.setPowerSource(ZB_POWER_SOURCE_MAINS);
   Zigbee.addEndpoint(&heightSensor);
+  diagnosticSensor.setManufacturerAndModel("JKCD", "Flexispot-E7Q-H2");
+  diagnosticSensor.setPowerSource(ZB_POWER_SOURCE_MAINS);
+  Zigbee.addEndpoint(&diagnosticSensor);
   // Keep CPU light sleep disabled too, if a future core enables power management.
 #if CONFIG_PM_ENABLE
   static esp_pm_lock_handle_t noLightSleep;
@@ -431,6 +483,7 @@ void loop() {
   }
   enforceAwakePolicy(millis());
   checkConnection(millis(), connected);
+  serviceDeviceDiagnostics(millis(), connected);
   printDiagnostics(millis());
   wasConnected = connected;
 

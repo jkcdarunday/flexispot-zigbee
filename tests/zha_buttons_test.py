@@ -22,11 +22,12 @@ async def main():
     from zha.application import EntityPlatform, EntityType
 
     definition = module.QUIRK.zha_device_factory.quirk_definition
-    metadata = definition.entity_metadata
+    metadata = [item for item in definition.entity_metadata if item.entity_platform == EntityPlatform.BUTTON]
     assert len(metadata) == 8
     assert {item.endpoint_id for item in metadata} == set(range(1, 9))
-    assert {rule.endpoint_id for rule in definition.disabled_default_entities} == set(range(1, 9))
-    assert all(rule.cluster_id == OnOff.cluster_id for rule in definition.disabled_default_entities)
+    control_rules = [rule for rule in definition.disabled_default_entities if rule.endpoint_id in range(1, 9)]
+    assert {rule.endpoint_id for rule in control_rules} == set(range(1, 9))
+    assert all(rule.cluster_id == OnOff.cluster_id for rule in control_rules)
     # Endpoint 9 remains a normal Analog Input height sensor.
     assert all(rule.endpoint_id != 9 for rule in definition.disabled_default_entities)
     assert module.hide_original_control(SimpleNamespace(translation_key=None))

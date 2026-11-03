@@ -167,6 +167,7 @@ through one parent router or coordinator and does not relay other devices' traff
 | 7 | Memory | Press M; enters save mode |
 | 8 | Release | Release emulated keys and discard queued commands |
 | 9 | Height | Analog Input sensor, last valid display height in cm |
+| 10 | Diagnostics | Uptime in seconds, persistent boot count, and last restart reason |
 
 These are momentary actions implemented with standard **On/Off** clusters.
 Firmware advertises the controls as general **On/Off Output** devices (type
@@ -318,6 +319,47 @@ Height is the **last valid display value**, not a guarantee the UART is still
 connected; a sleeping/blank/error display retains that value. Do not treat a
 cached height as an independent movement safety signal.
 
+## Uptime and reboot diagnostics
+
+Endpoint 10 exposes uptime in a standard Analog Input cluster (0x000c), with
+read-only extensions `0xf000` (uint32 boot count) and `0xf001` (enum8 reset reason).
+It keeps the application within the pinned SDK's ten-endpoint reporting layout.
+Uptime uses BACnet unit 73 (seconds), updates locally once per second, and uses
+the ESP32's 64-bit timer so
+it does not reset at the 49-day `millis()` rollover. All three sensors report
+every 30 seconds and immediately after joining. Failed report attempts are
+retried at most once per second without blocking desk commands.
+
+The boot counter is stored in NVS once per boot. It survives normal reboots and
+application-only firmware updates; a full flash erase resets it. It starts at
+one when this firmware first runs. If NVS cannot store it, its value is unknown
+and the USB log explains the failure. The read-only boot counter is an exact
+32-bit integer; zero is reserved for an unavailable counter.
+
+Update `integrations/zha/flexispot_e7q_h2.py` on Home Assistant and restart HA
+for named **Uptime**, **Boot count**, and **Last restart reason** diagnostic
+sensors. The handler renders reset codes as labels such as `brownout`,
+`task_watchdog`, `panic`, `software`, and `power_on`. Without the updated handler,
+standard ZHA discovery still exposes uptime; boot count and labeled restart
+reason require the updated handler. No light entities are added.
+The raw restart codes are 0 unknown, 1 power-on, 2 external reset, 3 software,
+4 panic, 5 interrupt watchdog, 6 task watchdog, 7 other watchdog, 8 deep sleep,
+9 brownout, 10 SDIO, 11 USB, 12 JTAG, 13 eFuse, 14 power glitch, 15 CPU lockup.
+An abrupt power loss may appear as `power_on`, so that label alone does not
+identify why power was lost. Zigbee recovery restarts appear as `software`.
+
+When upgrading existing router firmware, **do not erase flash**: the partition
+layout is unchanged and pairing can be retained. ZHA must discover the new
+endpoint; try **Reconfigure**, and if they do not appear, remove and re-add the
+device for a fresh interview (record entity IDs first). Zigbee2MQTT users should
+update the external converter and re-interview the device.
+
+If uptime falls or boot count increases, the board restarted. If Zigbee stops
+responding, Home Assistant only retains the last received readings; a frozen
+uptime display alone does not prove that the CPU stopped. The reset reason
+describes the last boot, not an ongoing stall. A running USB log is still useful
+for investigating solid yellow plus unresponsive commands.
+
 ## Onboard RGB status light
 
 The center WS2812 RGB LED uses GPIO8 by default. Its pin and brightness are
@@ -394,6 +436,7 @@ Native ZHA handler tests (Python 3.12+; use a separate virtual environment):
 python -m pip install -r tests/requirements-zha.txt
 python tests/zha_buttons_test.py
 python tests/zha_switch_discovery_test.py
+python tests/zha_diagnostics_test.py
 ```
 
 ## Credits and license

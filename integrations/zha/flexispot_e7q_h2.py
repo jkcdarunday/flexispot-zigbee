@@ -1,6 +1,13 @@
-"""Native ZHA command buttons for the existing Flexispot ESP32-H2 firmware."""
+"""Native ZHA command buttons and restart diagnostics for the Flexispot H2."""
 
-from zigpy.zcl.clusters.general import OnOff
+import enum
+
+import zigpy.types as t
+from zigpy.zcl.clusters.general import AnalogInput, OnOff
+from zigpy.zcl.foundation import ZCLAttributeDef
+from zhaquirks.clusters import CustomCluster
+from zha.application import EntityPlatform
+from zha.application.platforms.sensor.const import SensorDeviceClass, SensorStateClass
 
 try:
     # Current ZHA versions keep builders in zha-quirks.
@@ -42,5 +49,58 @@ for endpoint, key, name in CONTROLS:
         translation_key=f"flexispot_{key}",
         fallback_name=name,
     )
+
+
+class ResetReason(enum.IntEnum):
+    unknown = 0
+    power_on = 1
+    external_reset = 2
+    software = 3
+    panic = 4
+    interrupt_watchdog = 5
+    task_watchdog = 6
+    watchdog = 7
+    deep_sleep = 8
+    brownout = 9
+    sdio = 10
+    usb = 11
+    jtag = 12
+    efuse = 13
+    power_glitch = 14
+    cpu_lockup = 15
+
+
+class DiagnosticAnalogInput(CustomCluster, AnalogInput):
+    class AttributeDefs(AnalogInput.AttributeDefs):
+        boot_count = ZCLAttributeDef(id=0xf000, type=t.uint32_t, access="rp")
+        reset_reason = ZCLAttributeDef(id=0xf001, type=t.enum8, access="rp")
+
+
+def boot_count_or_unknown(value):
+    return None if value == 0 else value
+
+
+builder.replaces(DiagnosticAnalogInput, endpoint_id=10)
+builder.prevent_default_entity_creation(
+    endpoint_id=10, cluster_id=AnalogInput.cluster_id, function=hide_original_control,
+)
+builder.sensor(
+    attribute_name="present_value", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
+    unit="s", device_class=SensorDeviceClass.DURATION,
+    state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=0,
+    entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_uptime",
+    translation_key="flexispot_uptime", fallback_name="Uptime",
+).sensor(
+    attribute_name="boot_count", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
+    attribute_converter=boot_count_or_unknown,
+    state_class=SensorStateClass.TOTAL_INCREASING, suggested_display_precision=0,
+    entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_boot_count",
+    translation_key="flexispot_boot_count", fallback_name="Boot count",
+).enum(
+    attribute_name="reset_reason", cluster_id=AnalogInput.cluster_id, endpoint_id=10,
+    enum_class=ResetReason, entity_platform=EntityPlatform.SENSOR,
+    entity_type=EntityType.DIAGNOSTIC, unique_id_suffix="flexispot_reset_reason",
+    translation_key="flexispot_reset_reason", fallback_name="Last restart reason",
+)
 
 QUIRK = builder.add_to_registry()

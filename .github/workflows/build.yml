@@ -15,6 +15,7 @@ jobs:
           python -m pip install -r tests/requirements-zha.txt
           python tests/zha_buttons_test.py
           python tests/zha_switch_discovery_test.py
+          python tests/zha_diagnostics_test.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22
