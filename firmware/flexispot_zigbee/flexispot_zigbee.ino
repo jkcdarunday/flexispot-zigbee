@@ -21,11 +21,19 @@
 #if !defined(CONFIG_IDF_TARGET_ESP32H2)
 #error "Select ESP32H2 Dev Module"
 #endif
-#ifndef ZIGBEE_MODE_ED
-#error "Select Zigbee ED mode and the Zigbee partition scheme"
+#if defined(ZIGBEE_MODE_ZCZR) && defined(ZIGBEE_MODE_ED)
+#error "Select exactly one Zigbee mode"
+#elif defined(ZIGBEE_MODE_ZCZR)
+constexpr zigbee_role_t deskZigbeeRole = ZIGBEE_ROUTER;
+constexpr const char *deskZigbeeRoleName = "router";
+#elif defined(ZIGBEE_MODE_ED)
+constexpr zigbee_role_t deskZigbeeRole = ZIGBEE_END_DEVICE;
+constexpr const char *deskZigbeeRoleName = "end-device";
+#else
+#error "Select Zigbee ZCZR mode and the Zigbee ZCZR partition scheme (or ED mode for an end device)"
 #endif
 
-// Always-awake end device: mains powered, without acting as a mesh router.
+// Always awake in both modes. Router builds also relay Zigbee mesh traffic.
 HardwareSerial deskSerial(1);
 struct DeskUartDriver {
   uint32_t now() const { return millis(); }
@@ -269,7 +277,7 @@ void setup() {
   enableLoopWDT();
   Serial.begin(115200);  // native USB CDC; does not use desk UART pins
   Serial.setTxTimeoutMs(10);
-  logMessage("Boot: reset=%s\n", resetReason());
+  logMessage("Boot: reset=%s Zigbee_role=%s\n", resetReason(), deskZigbeeRoleName);
   if (!GPIO_IS_VALID_OUTPUT_GPIO(DESK_TX_PIN) || !GPIO_IS_VALID_GPIO(DESK_RX_PIN) ||
       !GPIO_IS_VALID_OUTPUT_GPIO(DESK_WAKE_PIN) ||
       (RESET_BUTTON_PIN >= 0 && !GPIO_IS_VALID_GPIO(RESET_BUTTON_PIN)) ||
@@ -320,7 +328,7 @@ void setup() {
 #endif
   connectionHealth.begin(millis());
   Zigbee.setRxOnWhenIdle(true);
-  if (!Zigbee.begin()) {
+  if (!Zigbee.begin(deskZigbeeRole)) {
     // begin() can time out while the stack is still retrying initialization
     // or a saved-network rejoin. Keep UART, LED and pairing reset responsive.
     logMessage("Zigbee startup pending; keeping desk interface active while the stack retries.\n");

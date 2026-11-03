@@ -29,9 +29,15 @@ jobs:
         run: >-
           arduino-cli core install esp32:esp32@3.3.6
           --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-      - name: Build ESP32-H2 firmware
+      - name: Build ESP32-H2 router firmware
         run: bash scripts/build.sh
+      - name: Build optional ESP32-H2 end-device firmware
+        run: ZIGBEE_ROLE=end-device bash scripts/build.sh --output-dir /tmp/flexispot-end-device-build
       - uses: actions/upload-artifact@v4
         with:
-          name: flexispot-e7q-esp32h2
+          name: flexispot-e7q-esp32h2-router
           path: build/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flexispot-e7q-esp32h2-end-device
+          path: /tmp/flexispot-end-device-build/

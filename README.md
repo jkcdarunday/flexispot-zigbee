@@ -3,7 +3,9 @@
 Firmware for a **Super Mini ESP32-H2**, adapting the desk protocol from
 [dimitri-vs/flexispot-esphome](https://github.com/dimitri-vs/flexispot-esphome)
 to native Zigbee. Pair it with a Home Assistant **ZHA** or **Zigbee2MQTT**
-coordinator. No Wi-Fi, ESPHome server, or MQTT client runs on the H2.
+coordinator. The default build is an always-awake **Zigbee router**: it controls
+the desk and relays mesh traffic through neighboring routers. No Wi-Fi, ESPHome
+server, or MQTT client runs on the H2.
 
 **Validation:** compiled for ESP32-H2 with Arduino-ESP32 3.3.6 and tested on
 the host for packet encoding, serial corruption, wake timing, bounded presses,
@@ -77,8 +79,8 @@ height or automatic memory press is sent at boot.
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`.
 2. Open `firmware/flexispot_zigbee/flexispot_zigbee.ino`.
 3. Select **ESP32H2 Dev Module** and your USB port.
-4. Set **Zigbee mode → Zigbee ED (end device)**,
-   **Partition Scheme → Zigbee 4MB with spiffs**, **Flash Size → 4MB**,
+4. Set **Zigbee mode → Zigbee ZCZR (coordinator/router)**,
+   **Partition Scheme → Zigbee ZCZR 4MB with spiffs**, **Flash Size → 4MB**,
    and **USB CDC On Boot → Enabled**. Verify your board actually has 4MB flash.
 5. Upload. If it does not enter the bootloader automatically, hold BOOT, tap
    RESET, release BOOT, then upload. Reboot afterward.
@@ -90,7 +92,7 @@ arduino-cli core install esp32:esp32@3.3.6 \
   --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 bash scripts/build.sh
 arduino-cli upload \
-  --fqbn 'esp32:esp32:esp32h2:ZigbeeMode=ed,PartitionScheme=zigbee,CDCOnBoot=cdc,FlashSize=4M' \
+  --fqbn 'esp32:esp32:esp32h2:ZigbeeMode=zczr,PartitionScheme=zigbee_zczr,CDCOnBoot=cdc,FlashSize=4M' \
   --port /dev/ttyACM0 --input-dir build firmware/flexispot_zigbee
 ```
 
@@ -102,16 +104,57 @@ bash scripts/build.sh --build-property \
   'compiler.cpp.extra_flags=-DDESK_TX_PIN=10 -DDESK_RX_PIN=11 -DDESK_WAKE_PIN=12'
 ```
 
-For a **2MB** H2 board use `FlashSize=2M,PartitionScheme=zigbee_2MB` instead
-of the 4MB settings (both when compiling and uploading). Do not flash a 4MB
-partition layout to a 2MB board. The build workflow uses the 4MB default and
-uploads its binaries as a GitHub Actions artifact.
+The script defaults to router mode. To build the previous always-awake end-device
+role, use `ZIGBEE_ROLE=end-device bash scripts/build.sh --output-dir build/end-device`.
+For that build, select `ZigbeeMode=ed,PartitionScheme=zigbee` when uploading;
+in the IDE select **Zigbee ED (end device)** and **Zigbee 4MB with spiffs**.
+The firmware selects its role explicitly from the selected Zigbee mode; ZCZR
+always starts a router, never a coordinator.
+
+For a **2MB** H2 router board use
+`FlashSize=2M,PartitionScheme=zigbee_zczr_2MB` instead of the 4MB settings
+(both when compiling and uploading). For a 2MB end-device build, use
+`FlashSize=2M,PartitionScheme=zigbee_2MB`. Pass the full modified FQBN with
+`--fqbn` to `scripts/build.sh` when compiling. Do not flash a 4MB partition
+layout to a 2MB board. CI compiles both roles and publishes separate artifacts.
+
+### Switching an existing installation to router mode
+
+This is a one-time network-role migration. Arduino-ESP32 3.3.6 uses different
+`zb_storage` and `zb_fct` offsets for ED and ZCZR builds. **An application-only
+flash at `0x10000` is insufficient.** Upload the router partition table and
+firmware together using the Arduino IDE or the CLI upload command above.
+
+1. Record the desk's Home Assistant entity IDs and automations, then remove
+   the existing desk device from ZHA so the router role gets a fresh interview.
+2. For this first router upload, enable **Erase All Flash Before Sketch Upload**
+   in the IDE. With the CLI, first run
+   `esptool --chip esp32h2 --port YOUR_PORT erase-flash`, then the upload command.
+   This clears the old pairing and both overlapping Zigbee storage layouts.
+   It also erases any other data on this ESP32; use it only for the migration.
+3. Enable adding devices in ZHA, then boot the router firmware and pair the desk.
+   Reinstalling the optional ZHA handler is unnecessary. Check entity IDs and
+   adjust automations if Home Assistant assigned different ones.
+4. Confirm ZHA identifies the device as a **Router**, the LED settles to green,
+   and new commands and height updates work. Multiple map links depend on
+   neighboring routers and the information available to ZHA; they are not guaranteed.
+
+Normal updates within the same role preserve pairing; keep erase-all disabled
+for those. Reverting to ED requires the same erase, matching partition upload,
+and pairing procedure. Router operation requires reliable continuous power and
+an antenna clear of the desk frame and capacitor. Alternative routes can improve
+recovery from a weak neighbor link, but cannot compensate for all links being weak.
+
+The role and partition settings follow
+[Espressif's ZigbeeCore documentation](https://docs.espressif.com/projects/arduino-esp32/en/latest/zigbee/zigbee_core.html).
 
 ## Home Assistant
 
 The device identifies itself as manufacturer **JKCD**, model
-**Flexispot-E7Q-H2**. It is an always-awake Zigbee end device, powered by USB or
-the desk. It does not extend your Zigbee mesh as a router.
+**Flexispot-E7Q-H2**. The default build is an always-awake Zigbee router, powered
+by USB or the desk. It can route its own traffic through different neighboring
+routers and relay traffic for other devices. The optional ED build communicates
+through one parent router or coordinator and does not relay other devices' traffic.
 
 | Endpoint | Control | Action when turned ON |
 | --- | --- | --- |
@@ -307,8 +350,10 @@ uses the normal firmware loop and adds no blink delays to desk control. This is 
 local indicator only and does not add a Home Assistant light entity. LED output
 uses asynchronous RMT with a persistent payload. If completion does not arrive
 within 50 ms, LED updates are disabled until reboot (`led_fail=1` in diagnostics);
-the UART and Zigbee loop continue. The watchdog also covers driver initialization. Updating this
-version keeps the same switch descriptors and does not require another re-pair.
+the UART and Zigbee loop continue. The watchdog also covers driver initialization.
+Updates within the same network role preserve pairing. Switching between ED and
+router mode requires the one-time migration described above. Endpoint descriptors
+and the optional ZHA handler are identical for both roles.
 If Zigbee's initial startup/rejoin wait times out, the firmware keeps its desk
 interface, status LED, and reset button running while the initialized Zigbee stack
 retries. A stack that never finishes initializing is restarted after five minutes;
@@ -372,9 +417,9 @@ is necessary because Arduino-ESP32 3.3.6's `setRxOnWhenIdle()` only stores a fla
 the library uses it in a battery-device workaround, not to directly set the
 receiver on our mains-powered endpoints. The pinned H2 SDK disables CPU power
 management at build time. A no-light-sleep lock also protects future builds where
-that feature is enabled. The bridge remains a Zigbee end device, with its
-existing parent keepalive settings, and does not require switching to a router
-or deleting the saved pairing.
+that feature is enabled. Both router and optional end-device builds remain awake.
+Normal connection recovery preserves the saved pairing for the selected role;
+it never automatically changes roles or factory-resets the device.
 
 The bridge queries the coordinator once per minute. If it has joined a network
 but receives no successful coordinator reply for five minutes, it releases its
@@ -391,8 +436,9 @@ a stack that returns from startup but never becomes ready. A functioning unpaire
 stack can still wait indefinitely for pairing. These
 recoveries preserve Zigbee pairing; holding BOOT remains the explicit reset.
 A prolonged coordinator outage can result in another recovery five minutes
-after rejoining. Rebooting releases bridge keys but is not a guaranteed motor
-stop for a preset already activated in the desk controller.
+after rejoining. In router mode a restart also briefly interrupts traffic being
+relayed for other devices. Rebooting releases bridge keys but is not a guaranteed
+motor stop for a preset already activated in the desk controller.
 
 If an outage persists, capture the USB serial log and check signal strength,
 power, and the coordinator. Once per minute, a `Health:` line includes uptime,
